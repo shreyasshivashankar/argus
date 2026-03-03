@@ -2,25 +2,11 @@
 
 Trading bot that places bets on NBA markets on Kalshi. Ingests live game scores and order book data over WebSockets, runs an LLM in the background to flag injuries/momentum shifts, and only pulls the trigger when the math checks out. Sizes positions with Kelly, tracks P&L, and kills everything if losses hit a threshold.
 
-## Prerequisites
+## Quick Start (Docker)
 
-- Python 3.11+
-- Redis
-- Kalshi API key pair (RSA-PSS)
-- An LLM API key -- Anthropic, Gemini, or OpenAI all work
-- Docker (optional)
+The fastest way to run. No Python, pip, or Redis install needed -- Docker handles everything.
 
-## Setup
-
-### 1. Install dependencies
-
-```bash
-cd ~/argus
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 2. Get your Kalshi API key
+### 1. Get your Kalshi API key
 
 **Demo (fake money):** [demo.kalshi.com](https://demo.kalshi.com) -> Settings -> API Keys -> Create
 
@@ -33,7 +19,7 @@ scp kalshi_private_key.pem shrey@kalshi-bot-instance-1:~/.ssh/kalshi_private_key
 chmod 600 ~/.ssh/kalshi_private_key.pem
 ```
 
-### 3. Configure `.env`
+### 2. Configure `.env`
 
 This file is gitignored. Fill in your keys:
 
@@ -57,24 +43,65 @@ GEMINI_API_KEY=AIza...          # Gemini
 LLM_API_KEY=sk-...              # OpenAI
 ```
 
-### 4. Start Redis
+### 3. Run
 
 ```bash
+# Paper mode -- simulated fills, trade tracking on, no money at risk
+docker-compose --profile paper up -d argus-paper
+
+# Open the live terminal monitor (optional, separate terminal)
+docker-compose run --rm argus-monitor
+
+# Check logs
+docker-compose logs -f argus-paper
+
+# After the games, check results
+sqlite3 data/trades.db "SELECT * FROM trades WHERE is_paper = 1;"
+
+# Stop everything
+docker-compose down
+```
+
+When you're ready to go live:
+
+```bash
+# Live orders on prod -- real money
+docker-compose up -d argus
+```
+
+Trade tracking and SQLite persistence are on by default. The `data/` folder is mounted to the host so `trades.db` survives container restarts.
+
+## Running Locally (without Docker)
+
+If you prefer running without Docker, you'll need Python 3.11+, Redis, and the dependencies installed manually.
+
+### Prerequisites
+
+- Python 3.11+
+- Redis
+- Kalshi API key pair (RSA-PSS)
+- An LLM API key -- Anthropic, Gemini, or OpenAI all work
+
+### Setup
+
+```bash
+cd ~/argus
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 redis-server --daemonize yes
 ```
 
-## Running
+Configure `.env` the same way as above (steps 1-2).
+
+### Run
 
 Three flags: `--env` (demo/prod), `--paper` (simulated fills), `--track` (log trades to SQLite).
 
 ```bash
 # Paper trading on demo -- start here
-python main.py --env demo --paper
-
-# Same thing, but log trades to SQLite
 python main.py --env demo --paper --track
 
-# Live orders on demo -- places real orders, but it's fake money
+# Live orders on demo -- real orders, fake money
 python main.py --env demo --track
 
 # Paper on prod -- real market data, simulated fills
@@ -90,30 +117,6 @@ Work your way up:
 2. `--env demo` -- actually place orders on the demo exchange
 3. `--env prod --paper` -- run against real market data without risking anything
 4. `--env prod` -- go live
-
-### Docker
-
-No local Python or Redis needed. `--track` is on by default, `data/` is mounted so the SQLite DB persists.
-
-```bash
-# Tests
-docker build --target test -t argus-test . && docker run --rm argus-test
-
-# Live
-docker-compose up -d argus
-
-# Paper
-docker-compose --profile paper up -d argus-paper
-
-# Terminal monitor (needs TTY)
-docker-compose run --rm argus-monitor
-
-# Logs
-docker-compose logs -f argus
-
-# Stop
-docker-compose down
-```
 
 ## Monitoring
 
