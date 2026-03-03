@@ -101,8 +101,7 @@ class TrackAgent(BaseAgent):
         self._db = await self._init_db()
         try:
             await self.bus.subscribe(
-                ["signal:validated", "signal:executed", "signal:reallocate"],
-                self._on_message,
+                ["signal:validated", "signal:executed"], self._on_message
             )
         finally:
             await self._close_db()
@@ -112,7 +111,7 @@ class TrackAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     async def _on_message(self, channel: str, data: dict[str, Any]) -> None:
-        if channel in ("signal:validated", "signal:reallocate"):
+        if channel == "signal:validated":
             await self._on_validated(data)
         elif channel == "signal:executed":
             await self._on_executed(data)
