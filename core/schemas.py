@@ -190,7 +190,7 @@ class AppSettings(BaseSettings):
     TELEGRAM_CHAT_ID: str = ""
 
     # Risk management
-    DAILY_STOP_LOSS_USD: float = 200.0
+    DAILY_STOP_LOSS_USD: float = 100.0
     SLIPPAGE_TICKS: int = 2
     KELLY_FRACTION: float = 0.5
     TARGET_EXIT_SPREAD: int = 7  # cents above entry
