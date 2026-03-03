@@ -15,6 +15,7 @@ services:
     build:
       context: .
       target: production
+    command: ["python", "main.py", "--track"]
     depends_on:
       redis:
         condition: service_healthy
@@ -23,6 +24,7 @@ services:
       - REDIS_URL=redis://redis:6379
     volumes:
       - ./logs:/app/logs
+      - ./data:/app/data
       - ${KALSHI_PRIVATE_KEY_PATH:-./keys/kalshi_private_key.pem}:/app/keys/kalshi_private_key.pem:ro
     restart: unless-stopped
 
@@ -30,7 +32,7 @@ services:
     build:
       context: .
       target: production
-    command: ["python", "main.py", "--paper"]
+    command: ["python", "main.py", "--paper", "--track"]
     depends_on:
       redis:
         condition: service_healthy
@@ -39,9 +41,26 @@ services:
       - REDIS_URL=redis://redis:6379
     volumes:
       - ./logs:/app/logs
+      - ./data:/app/data
       - ${KALSHI_PRIVATE_KEY_PATH:-./keys/kalshi_private_key.pem}:/app/keys/kalshi_private_key.pem:ro
     profiles:
       - paper
+
+  argus-monitor:
+    build:
+      context: .
+      target: production
+    command: ["python", "-m", "scripts.monitor"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    tty: true
+    stdin_open: true
+    profiles:
+      - monitor
 
   test:
     build:

@@ -22,6 +22,7 @@ from agents.executor import OrderExecutor
 from agents.narrative import NarrativeAgent
 from agents.nba_quant import NBAQuantAgent
 from agents.paper_executor import PaperExecutor
+from agents.track_agent import TrackAgent
 from core.bus import SignalBus
 from core.client import KalshiAsyncClient
 from core.schemas import AppSettings
@@ -43,10 +44,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run in paper trading mode (simulated matching engine, no real orders)",
     )
+    parser.add_argument(
+        "--track",
+        action="store_true",
+        help="Enable SQLite trade tracker (persists all trades to data/trades.db)",
+    )
     return parser.parse_args()
 
 
-async def main(paper_mode: bool = False, env_override: str | None = None) -> None:
+async def main(
+    paper_mode: bool = False,
+    env_override: str | None = None,
+    track_mode: bool = False,
+) -> None:
     if env_override:
         os.environ["KALSHI_ENV"] = env_override
 
@@ -80,6 +90,11 @@ async def main(paper_mode: bool = False, env_override: str | None = None) -> Non
         kalshi_feed.on_fill(executor.on_fill)
         kalshi_feed.on_order_update(executor.on_order_update)
 
+    tracker: TrackAgent | None = None
+    if track_mode:
+        tracker = TrackAgent(settings, bus, client, paper_mode=paper_mode)
+        logger.info("Trade tracker enabled (is_paper={})", paper_mode)
+
     # --- Graceful shutdown ---
     shutdown_event = asyncio.Event()
 
@@ -99,6 +114,8 @@ async def main(paper_mode: bool = False, env_override: str | None = None) -> Non
         asyncio.create_task(narrative.start(), name="narrative"),
         asyncio.create_task(executor.start(), name="executor"),
     ]
+    if tracker:
+        tasks.append(asyncio.create_task(tracker.start(), name="track"))
 
     # Wait for shutdown signal
     await shutdown_event.wait()
@@ -120,6 +137,8 @@ async def main(paper_mode: bool = False, env_override: str | None = None) -> Non
     nba_quant.stop()
     narrative.stop()
     executor.stop()
+    if tracker:
+        tracker.stop()
 
     await client.close()
     await bus.close()
@@ -134,4 +153,6 @@ if __name__ == "__main__":
         uvloop.install()
     except ImportError:
         pass
-    asyncio.run(main(paper_mode=args.paper, env_override=args.env))
+    asyncio.run(
+        main(paper_mode=args.paper, env_override=args.env, track_mode=args.track)
+    )

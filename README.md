@@ -68,20 +68,23 @@ redis-server --daemonize yes
 
 ## Running
 
-The bot takes two flags: `--env` (demo or prod) and `--paper` (simulated or live orders).
+The bot takes three flags: `--env` (demo or prod), `--paper` (simulated or live orders), and `--track` (enable SQLite trade persistence).
 
 ```bash
 # Paper trading on demo -- safest, start here
 python main.py --env demo --paper
 
+# Paper trading + trade tracking
+python main.py --env demo --paper --track
+
 # Live orders on demo -- real Kalshi demo orders, fake money
-python main.py --env demo
+python main.py --env demo --track
 
 # Paper trading on prod -- real market data, simulated fills
-python main.py --env prod --paper
+python main.py --env prod --paper --track
 
 # Live orders on prod -- REAL MONEY
-python main.py --env prod
+python main.py --env prod --track
 ```
 
 **Recommended progression:**
@@ -93,17 +96,20 @@ python main.py --env prod
 
 ### Running with Docker
 
-No local Python or Redis setup needed.
+No local Python or Redis setup needed. Both `argus` and `argus-paper` services have `--track` enabled by default, and `data/` is mounted so `trades.db` persists on the host.
 
 ```bash
 # Run tests
 docker build --target test -t argus-test . && docker run --rm argus-test
 
-# Run in production mode (includes Redis)
+# Run in production mode (includes Redis, tracking enabled)
 docker-compose up -d argus
 
-# Run in paper trading mode
+# Run in paper trading mode (tracking enabled, is_paper=True)
 docker-compose --profile paper up -d argus-paper
+
+# Open the live terminal monitor (requires interactive TTY)
+docker-compose run --rm argus-monitor
 
 # View logs
 docker-compose logs -f argus
@@ -111,6 +117,43 @@ docker-compose logs -f argus
 # Stop
 docker-compose down
 ```
+
+## Monitoring
+
+### Terminal Dashboard
+
+A read-only Rich TUI that subscribes to the Redis bus and displays live P&L, win rate, agent health, and active game context. Runs in a separate terminal -- does not interfere with the trading process.
+
+```bash
+# Local
+python -m scripts.monitor
+
+# Docker (must be interactive, not detached)
+docker-compose run --rm argus-monitor
+```
+
+The dashboard shows four panels: a stats header (P&L, win rate, kill switch limit), an event feed of validated signals and executions, an agent health table (last heartbeat), and an active games panel with SAFE/VETO context status.
+
+### Trade Tracker (SQLite)
+
+Enable with `--track` to persist every signal and execution to `data/trades.db`. The tracker tags every row with `is_paper` based on the `--paper` flag to prevent data pollution between paper and live modes.
+
+```bash
+# Query live-only trades
+sqlite3 data/trades.db "SELECT * FROM trades WHERE is_paper = 0;"
+
+# Query paper-only trades
+sqlite3 data/trades.db "SELECT * FROM trades WHERE is_paper = 1;"
+
+# Win rate for live trades
+sqlite3 data/trades.db "SELECT
+  COUNT(*) FILTER (WHERE pnl_dollars > 0) AS wins,
+  COUNT(*) FILTER (WHERE pnl_dollars < 0) AS losses,
+  SUM(pnl_dollars) AS total_pnl
+FROM trades WHERE status = 'EXECUTED' AND is_paper = 0;"
+```
+
+See `docs/MONITORING.md` for full architecture details.
 
 ## Running Tests
 
@@ -126,11 +169,11 @@ docker build --target test -t argus-test . && docker run --rm argus-test
 
 ```
 argus-hybrid/
-├── main.py                    # Entrypoint (--env, --paper flags)
+├── main.py                    # Entrypoint (--env, --paper, --track flags)
 ├── requirements.txt           # Production + test dependencies
 ├── pyproject.toml             # Pytest config
 ├── Dockerfile                 # Multi-stage: base → test → production
-├── docker-compose.yml         # Redis + bot services
+├── docker-compose.yml         # Redis + bot + monitor services
 ├── .env                       # API keys and config (gitignored)
 │
 ├── core/                      # Infrastructure layer
@@ -147,7 +190,11 @@ argus-hybrid/
 │   ├── nba_quant.py           # NBA quant trigger (+EV detection)
 │   ├── narrative.py           # Out-of-band LLM context monitor (OpenAI/Claude/Gemini)
 │   ├── executor.py            # Fill-aware execution state machine
-│   └── paper_executor.py      # Simulated matching engine for paper trading
+│   ├── paper_executor.py      # Simulated matching engine for paper trading
+│   └── track_agent.py         # SQLite trade tracker (WAL mode, paper/live isolation)
+│
+├── scripts/                   # Standalone utilities
+│   └── monitor.py             # Rich terminal dashboard (read-only Redis observer)
 │
 ├── tests/                     # Test suite
 │   ├── conftest.py            # Shared fixtures and mock environment
@@ -157,9 +204,10 @@ argus-hybrid/
 │   └── test_client.py         # Fault injection (502/429 retry backoff)
 │
 ├── docs/
-│   └── ARCHITECTURE.md        # System architecture design doc
+│   ├── ARCHITECTURE.md        # System architecture design doc
+│   └── MONITORING.md          # Monitoring & trade tracking design doc
 │
-├── data/                      # Historical backtest data
+├── data/                      # Historical backtest data + trades.db
 └── logs/                      # Runtime logs (gitignored)
 ```
 

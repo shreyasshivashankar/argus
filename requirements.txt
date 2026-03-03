@@ -11,6 +11,8 @@ loguru
 python-dotenv
 telegram-send
 cryptography
+rich
+aiosqlite
 
 # Testing
 pytest>=8.0.0

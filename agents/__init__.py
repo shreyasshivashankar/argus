@@ -8,6 +8,7 @@ from agents.narrative import (
 )
 from agents.executor import OrderExecutor
 from agents.paper_executor import PaperExecutor
+from agents.track_agent import TrackAgent
 
 __all__ = [
     "AnthropicProvider",
@@ -18,4 +19,5 @@ __all__ = [
     "OpenAIProvider",
     "OrderExecutor",
     "PaperExecutor",
+    "TrackAgent",
 ]
