@@ -1,63 +1,60 @@
 # Argus
 
-Production-grade Kalshi trading bot for NBA markets. WebSocket-first data ingestion, out-of-band LLM context monitoring, fail-close quant trigger, and a fill-aware executor with Kelly sizing.
+Trading bot that places bets on NBA markets on Kalshi. Ingests live game scores and order book data over WebSockets, runs an LLM in the background to flag injuries/momentum shifts, and only pulls the trigger when the math checks out. Sizes positions with Kelly, tracks P&L, and kills everything if losses hit a threshold.
 
 ## Prerequisites
 
 - Python 3.11+
-- Redis server
+- Redis
 - Kalshi API key pair (RSA-PSS)
-- LLM API key (Anthropic, Google Gemini, or OpenAI)
-- Docker (optional, for containerized runs)
+- An LLM API key -- Anthropic, Gemini, or OpenAI all work
+- Docker (optional)
 
 ## Setup
 
 ### 1. Install dependencies
 
 ```bash
-cd ~/argus-hybrid
+cd ~/argus
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Generate your Kalshi API key
+### 2. Get your Kalshi API key
 
-**For demo (fake money):** go to [demo.kalshi.com](https://demo.kalshi.com) -> Settings -> API Keys -> Create API Key
+**Demo (fake money):** [demo.kalshi.com](https://demo.kalshi.com) -> Settings -> API Keys -> Create
 
-**For prod (real money):** go to [kalshi.com](https://kalshi.com) -> Settings -> API Keys -> Create API Key
+**Prod (real money):** [kalshi.com](https://kalshi.com) -> Settings -> API Keys -> Create
 
-This gives you an **API Key ID** and a **private key `.pem` file** download. Place the key on your server:
+You'll get an API Key ID and a `.pem` private key file. Put the key somewhere safe on your server:
 
 ```bash
-# From your local machine
 scp kalshi_private_key.pem shrey@kalshi-bot-instance-1:~/.ssh/kalshi_private_key.pem
-
-# Lock down permissions
 chmod 600 ~/.ssh/kalshi_private_key.pem
 ```
 
 ### 3. Configure `.env`
 
-Edit `.env` with your real keys. This file is gitignored and never leaves the server.
+This file is gitignored. Fill in your keys:
 
 ```bash
 nano .env
 ```
 
-**Required fields:**
+Required:
 
 ```
 KALSHI_API_KEY_ID=your-api-key-id
 KALSHI_PRIVATE_KEY_PATH=/home/shrey/.ssh/kalshi_private_key.pem
 ```
 
-**LLM provider** -- all three are preconfigured. Set `LLM_PROVIDER` and the matching API key:
+LLM -- pick one, set the provider and its key:
 
 ```
 LLM_PROVIDER=anthropic          # "openai", "anthropic", or "gemini"
-ANTHROPIC_API_KEY=sk-ant-...    # for Claude
-GEMINI_API_KEY=AIza...          # for Gemini
-LLM_API_KEY=sk-...              # for OpenAI
+ANTHROPIC_API_KEY=sk-ant-...    # Claude
+GEMINI_API_KEY=AIza...          # Gemini
+LLM_API_KEY=sk-...              # OpenAI
 ```
 
 ### 4. Start Redis
@@ -68,50 +65,50 @@ redis-server --daemonize yes
 
 ## Running
 
-The bot takes three flags: `--env` (demo or prod), `--paper` (simulated or live orders), and `--track` (enable SQLite trade persistence).
+Three flags: `--env` (demo/prod), `--paper` (simulated fills), `--track` (log trades to SQLite).
 
 ```bash
-# Paper trading on demo -- safest, start here
+# Paper trading on demo -- start here
 python main.py --env demo --paper
 
-# Paper trading + trade tracking
+# Same thing, but log trades to SQLite
 python main.py --env demo --paper --track
 
-# Live orders on demo -- real Kalshi demo orders, fake money
+# Live orders on demo -- places real orders, but it's fake money
 python main.py --env demo --track
 
-# Paper trading on prod -- real market data, simulated fills
+# Paper on prod -- real market data, simulated fills
 python main.py --env prod --paper --track
 
-# Live orders on prod -- REAL MONEY
+# Live on prod -- real money
 python main.py --env prod --track
 ```
 
-**Recommended progression:**
+Work your way up:
 
-1. `--env demo --paper` -- verify logs, context checks, +EV detection
-2. `--env demo` -- test real order placement against demo exchange
-3. `--env prod --paper` -- validate against real market data
-4. `--env prod` -- go live with real capital
+1. `--env demo --paper` -- make sure logs look right, context checks fire, EV detection works
+2. `--env demo` -- actually place orders on the demo exchange
+3. `--env prod --paper` -- run against real market data without risking anything
+4. `--env prod` -- go live
 
-### Running with Docker
+### Docker
 
-No local Python or Redis setup needed. Both `argus` and `argus-paper` services have `--track` enabled by default, and `data/` is mounted so `trades.db` persists on the host.
+No local Python or Redis needed. `--track` is on by default, `data/` is mounted so the SQLite DB persists.
 
 ```bash
-# Run tests
+# Tests
 docker build --target test -t argus-test . && docker run --rm argus-test
 
-# Run in production mode (includes Redis, tracking enabled)
+# Live
 docker-compose up -d argus
 
-# Run in paper trading mode (tracking enabled, is_paper=True)
+# Paper
 docker-compose --profile paper up -d argus-paper
 
-# Open the live terminal monitor (requires interactive TTY)
+# Terminal monitor (needs TTY)
 docker-compose run --rm argus-monitor
 
-# View logs
+# Logs
 docker-compose logs -f argus
 
 # Stop
@@ -122,30 +119,28 @@ docker-compose down
 
 ### Terminal Dashboard
 
-A read-only Rich TUI that subscribes to the Redis bus and displays live P&L, win rate, agent health, and active game context. Runs in a separate terminal -- does not interfere with the trading process.
+A live terminal UI that tails the Redis event bus. Shows P&L, win rate, agent heartbeats, and game context. Read-only -- doesn't touch the trading loop.
 
 ```bash
 # Local
 python -m scripts.monitor
 
-# Docker (must be interactive, not detached)
+# Docker
 docker-compose run --rm argus-monitor
 ```
 
-The dashboard shows four panels: a stats header (P&L, win rate, kill switch limit), an event feed of validated signals and executions, an agent health table (last heartbeat), and an active games panel with SAFE/VETO context status.
+### Trade Tracker
 
-### Trade Tracker (SQLite)
-
-Enable with `--track` to persist every signal and execution to `data/trades.db`. The tracker tags every row with `is_paper` based on the `--paper` flag to prevent data pollution between paper and live modes.
+Pass `--track` to log every signal and fill to `data/trades.db`. Paper and live trades are tagged separately so they don't mix.
 
 ```bash
-# Query live-only trades
+# Live trades
 sqlite3 data/trades.db "SELECT * FROM trades WHERE is_paper = 0;"
 
-# Query paper-only trades
+# Paper trades
 sqlite3 data/trades.db "SELECT * FROM trades WHERE is_paper = 1;"
 
-# Win rate for live trades
+# Win rate
 sqlite3 data/trades.db "SELECT
   COUNT(*) FILTER (WHERE pnl_dollars > 0) AS wins,
   COUNT(*) FILTER (WHERE pnl_dollars < 0) AS losses,
@@ -153,80 +148,79 @@ sqlite3 data/trades.db "SELECT
 FROM trades WHERE status = 'EXECUTED' AND is_paper = 0;"
 ```
 
-See `docs/MONITORING.md` for full architecture details.
+More details in `docs/MONITORING.md`.
 
-## Running Tests
+## Tests
 
 ```bash
-# Local
 pytest tests/ -v
 
-# Docker (no dependencies needed)
+# Or via Docker
 docker build --target test -t argus-test . && docker run --rm argus-test
 ```
 
 ## Project Structure
 
 ```
-argus-hybrid/
-├── main.py                    # Entrypoint (--env, --paper, --track flags)
-├── requirements.txt           # Production + test dependencies
-├── pyproject.toml             # Pytest config
-├── Dockerfile                 # Multi-stage: base → test → production
-├── docker-compose.yml         # Redis + bot + monitor services
-├── .env                       # API keys and config (gitignored)
+argus/
+├── main.py                    # Entrypoint (--env, --paper, --track)
+├── requirements.txt
+├── pyproject.toml
+├── Dockerfile
+├── docker-compose.yml
+├── .env                       # Your API keys (gitignored)
 │
-├── core/                      # Infrastructure layer
-│   ├── schemas.py             # Pydantic models (Signal, Order, GameState, etc.)
-│   ├── bus.py                 # Redis Pub/Sub + context cache (fail-close)
-│   ├── client.py              # Kalshi async REST client + RSA-PSS WS auth
-│   └── base_agent.py          # BaseAgent ABC (logging, heartbeat, uvloop)
+├── core/
+│   ├── schemas.py             # Pydantic models and settings
+│   ├── bus.py                 # Redis pub/sub + context cache
+│   ├── client.py              # Kalshi REST client + WS auth
+│   └── base_agent.py          # Base class for all agents
 │
-├── watchers/                  # Data ingestion layer
-│   ├── sports_feed.py         # Sports API WebSocket + Balldontlie (research)
-│   └── kalshi_feed.py         # Kalshi WS (orderbook, ticker, fill, user_orders)
+├── watchers/
+│   ├── sports_feed.py         # Live game scores via WebSocket
+│   └── kalshi_feed.py         # Kalshi order book + fills via WebSocket
 │
-├── agents/                    # Trading logic layer
-│   ├── nba_quant.py           # NBA quant trigger (+EV detection)
-│   ├── narrative.py           # Out-of-band LLM context monitor (OpenAI/Claude/Gemini)
-│   ├── executor.py            # Fill-aware execution state machine
-│   ├── paper_executor.py      # Simulated matching engine for paper trading
-│   └── track_agent.py         # SQLite trade tracker (WAL mode, paper/live isolation)
+├── agents/
+│   ├── nba_quant.py           # EV detection and signal generation
+│   ├── narrative.py           # LLM context monitor (injury reports, momentum)
+│   ├── executor.py            # Order lifecycle, Kelly sizing, kill switch
+│   ├── paper_executor.py      # Simulated matching engine for paper mode
+│   └── track_agent.py         # SQLite trade logger
 │
-├── scripts/                   # Standalone utilities
-│   └── monitor.py             # Rich terminal dashboard (read-only Redis observer)
+├── scripts/
+│   └── monitor.py             # Terminal dashboard
 │
-├── tests/                     # Test suite
-│   ├── conftest.py            # Shared fixtures and mock environment
-│   ├── test_kalshi_feed.py    # Order book delta tests
-│   ├── test_executor.py       # Kelly, kill switch, fills, VWAP, GC tests
-│   ├── test_nba_quant.py      # Context cache + fail-close tests
-│   └── test_client.py         # Fault injection (502/429 retry backoff)
+├── tests/
+│   ├── conftest.py
+│   ├── test_kalshi_feed.py
+│   ├── test_executor.py
+│   ├── test_nba_quant.py
+│   └── test_client.py
 │
 ├── docs/
-│   ├── ARCHITECTURE.md        # System architecture design doc
-│   └── MONITORING.md          # Monitoring & trade tracking design doc
+│   ├── ARCHITECTURE.md
+│   └── MONITORING.md
 │
-├── data/                      # Historical backtest data + trades.db
-└── logs/                      # Runtime logs (gitignored)
+├── data/                      # Backtest data + trades.db
+└── logs/
 ```
 
 ## Adding New Sports
 
-1. **Create a quant agent** -- subclass `BaseAgent` in `agents/nfl_quant.py` with sport-specific probability models
-2. **Add a sports feed** -- subclass `SportsFeed` in `watchers/sports_feed.py` if a different data provider is needed
-3. **Register in `main.py`** -- instantiate and add to the `asyncio.gather` launch
+1. Write a new quant agent -- subclass `BaseAgent` (e.g. `agents/nfl_quant.py`)
+2. Add a sports feed if the data source is different
+3. Wire it up in `main.py`
 
-The core infrastructure (Redis bus, Kalshi client, executor) is sport-agnostic.
+The core stuff (Redis bus, Kalshi client, executor) doesn't care about the sport.
 
 ## Key Invariants
 
-- **Fail-close**: missing Redis context = VETO. Never trades blind.
-- **No REST in hot path**: bankroll is background-cached. No HTTP calls during execution.
-- **No LLM in hot path**: context is pre-computed out-of-band.
-- **Limit orders only**: no market order codepath exists.
-- **Fill-before-sell**: exit orders only dispatch after Kalshi fill confirmation.
-- **Incremental exits**: partial fills are hedged immediately, not after full fill.
-- **VWAP P&L**: kill switch uses actual execution prices, not limit prices.
-- **Reallocation hurdle**: new trade's total projected EV must strictly exceed foregone profit + taker fees before liquidating a resting exit.
-- **Order-level targeting**: reallocation uses `target_order_id`, not ticker matching, to handle partial-fill batches correctly.
+- Missing context = VETO. The bot never trades blind.
+- No REST calls in the hot path. Bankroll is background-cached.
+- LLM runs out-of-band. Context is pre-computed, not inline.
+- Limit orders only. No market order codepath.
+- Exit orders wait for fill confirmation before dispatching.
+- Partial fills get hedged immediately.
+- Kill switch uses VWAP, not limit prices.
+- Reallocation only happens when the new trade's projected EV strictly beats the foregone profit plus fees.
+- Reallocation targets orders by ID, not by ticker, so partial-fill batches don't get mixed up.
