@@ -88,21 +88,19 @@ class TestHandleOBSnapshot:
     def test_snapshot_populates_bids_asks(self, watcher):
         msg = {
             "market_ticker": "NBA-YES-LAL",
-            "yes": [[50, 100], [45, 200]],
-            "no": [[55, 80], [60, 120]],
+            "bids": [[50, 100], [45, 200]],
+            "asks": [[55, 80], [60, 120]],
         }
         watcher._handle_ob_snapshot(msg)
         ob = watcher._orderbooks["NBA-YES-LAL"]
-        # Bids from "yes" sorted descending
         assert ob["bids"] == [[50, 100], [45, 200]]
-        # Asks from "no" sorted ascending
         assert ob["asks"] == [[55, 80], [60, 120]]
 
     def test_snapshot_sorts_correctly(self, watcher):
         msg = {
             "market_ticker": "T1",
-            "yes": [[10, 50], [30, 50], [20, 50]],  # unsorted
-            "no": [[60, 50], [40, 50], [50, 50]],    # unsorted
+            "bids": [[10, 50], [30, 50], [20, 50]],  # unsorted
+            "asks": [[60, 50], [40, 50], [50, 50]],   # unsorted
         }
         watcher._handle_ob_snapshot(msg)
         ob = watcher._orderbooks["T1"]
@@ -111,7 +109,7 @@ class TestHandleOBSnapshot:
 
 
 # ===========================================================================
-# _handle_ob_delta → publishes MarketState
+# _handle_ob_delta → publishes MarketState (Kalshi V2 batch format)
 # ===========================================================================
 
 class TestHandleOBDelta:
@@ -124,9 +122,8 @@ class TestHandleOBDelta:
         }
         msg = {
             "market_ticker": "NBA-YES-LAL",
-            "price": 48,
-            "delta": 200,
-            "side": "yes",  # yes → bids
+            "bids": [[48, 200]],
+            "asks": [],
         }
         await watcher._handle_ob_delta(msg)
         watcher._bus.publish.assert_called_once()
@@ -145,9 +142,35 @@ class TestHandleOBDelta:
         }
         msg = {
             "market_ticker": "T1",
-            "price": 50,
-            "delta": 0,  # remove this level
-            "side": "yes",
+            "bids": [[50, 0]],   # remove this level
+            "asks": [],
         }
         await watcher._handle_ob_delta(msg)
         assert watcher._orderbooks["T1"]["bids"] == [[45, 200]]
+
+    @pytest.mark.asyncio
+    async def test_delta_batch_updates(self, watcher):
+        """Multiple bid and ask updates in a single delta message."""
+        watcher._orderbooks["T2"] = {
+            "bids": [[50, 100]],
+            "asks": [[55, 80]],
+        }
+        msg = {
+            "market_ticker": "T2",
+            "bids": [[48, 150], [50, 0]],     # add 48, remove 50
+            "asks": [[55, 200], [60, 100]],    # update 55, add 60
+        }
+        await watcher._handle_ob_delta(msg)
+        assert watcher._orderbooks["T2"]["bids"] == [[48, 150]]
+        assert watcher._orderbooks["T2"]["asks"] == [[55, 200], [60, 100]]
+
+    @pytest.mark.asyncio
+    async def test_delta_unknown_ticker_ignored(self, watcher):
+        """Delta for a ticker with no snapshot should be silently skipped."""
+        msg = {
+            "market_ticker": "UNKNOWN",
+            "bids": [[50, 100]],
+            "asks": [],
+        }
+        await watcher._handle_ob_delta(msg)
+        watcher._bus.publish.assert_not_called()

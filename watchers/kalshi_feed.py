@@ -181,8 +181,8 @@ class KalshiFeedWatcher:
     def _handle_ob_snapshot(self, msg: dict) -> None:
         ticker = msg.get("market_ticker", "")
         self._orderbooks[ticker] = {
-            "bids": [list(lvl) for lvl in msg.get("yes", [])],
-            "asks": [list(lvl) for lvl in msg.get("no", [])],
+            "bids": [list(lvl) for lvl in msg.get("bids", [])],
+            "asks": [list(lvl) for lvl in msg.get("asks", [])],
         }
         self._sort_book(ticker)
         logger.debug(
@@ -193,17 +193,22 @@ class KalshiFeedWatcher:
 
     async def _handle_ob_delta(self, msg: dict) -> None:
         ticker = msg.get("market_ticker", "")
-        price = msg.get("price", 0)
-        quantity = msg.get("delta", 0)
-        side = msg.get("side", "")
+        if ticker not in self._orderbooks:
+            return
 
-        book_side = "bids" if side == "yes" else "asks"
-        book = self._orderbooks[ticker][book_side]
-        self._apply_delta(book, price, quantity, ascending=(book_side == "asks"))
+        bids_delta = msg.get("bids", [])
+        asks_delta = msg.get("asks", [])
 
-        ob = self._orderbooks[ticker]
-        bids = ob["bids"]
-        asks = ob["asks"]
+        book = self._orderbooks[ticker]
+
+        for price, quantity in bids_delta:
+            self._apply_delta(book["bids"], price, quantity, ascending=False)
+
+        for price, quantity in asks_delta:
+            self._apply_delta(book["asks"], price, quantity, ascending=True)
+
+        bids = book["bids"]
+        asks = book["asks"]
         try:
             market_state = MarketState(
                 ticker=ticker,
