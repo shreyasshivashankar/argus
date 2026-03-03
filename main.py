@@ -3,13 +3,16 @@
 Entrypoint that wires all components together and runs them concurrently.
 
 Usage:
-    python main.py              # Production mode (real Kalshi orders)
-    python main.py --paper      # Paper trading mode (simulated matching engine)
+    python main.py --env demo --paper    # Paper trading on demo (safest)
+    python main.py --env demo            # Live orders on demo (fake money)
+    python main.py --env prod --paper    # Paper trading on prod (real data, no orders)
+    python main.py --env prod            # Live orders on prod (real money)
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import signal as _signal
 import sys
 
@@ -29,6 +32,13 @@ from watchers.sports_feed import APISportsFeed
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Argus Kalshi Trading Bot")
     parser.add_argument(
+        "--env",
+        choices=["demo", "prod"],
+        default=None,
+        help="Kalshi environment: 'demo' (fake money) or 'prod' (real money). "
+             "Overrides KALSHI_ENV in .env",
+    )
+    parser.add_argument(
         "--paper",
         action="store_true",
         help="Run in paper trading mode (simulated matching engine, no real orders)",
@@ -36,11 +46,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def main(paper_mode: bool = False) -> None:
-    mode_label = "PAPER" if paper_mode else "LIVE"
+async def main(paper_mode: bool = False, env_override: str | None = None) -> None:
+    if env_override:
+        os.environ["KALSHI_ENV"] = env_override
 
     # --- Configuration ---
     settings = AppSettings()  # type: ignore[call-arg]
+
+    mode_label = "PAPER" if paper_mode else "LIVE"
 
     logger.remove()
     logger.add(sys.stderr, level="INFO")
@@ -121,4 +134,4 @@ if __name__ == "__main__":
         uvloop.install()
     except ImportError:
         pass
-    asyncio.run(main(paper_mode=args.paper))
+    asyncio.run(main(paper_mode=args.paper, env_override=args.env))
