@@ -11,3 +11,9 @@ loguru
 python-dotenv
 telegram-send
 cryptography
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+aioresponses>=0.7.0
+freezegun>=1.0.0

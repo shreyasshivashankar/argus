@@ -75,6 +75,95 @@ class OpenAIProvider(LLMProvider):
             await self._session.close()
 
 
+class AnthropicProvider(LLMProvider):
+    """Anthropic Claude provider (claude-sonnet-4-20250514, claude-opus-4-20250514, etc.).
+
+    Uses the Anthropic Messages REST API directly via aiohttp.
+    """
+
+    _URL = "https://api.anthropic.com/v1/messages"
+
+    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514") -> None:
+        import aiohttp
+
+        self._api_key = api_key
+        self._model = model
+        self._session: aiohttp.ClientSession | None = None
+        self._headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+
+    async def _ensure_session(self) -> "aiohttp.ClientSession":
+        import aiohttp
+
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(headers=self._headers)
+        return self._session
+
+    async def query(self, prompt: str) -> str:
+        session = await self._ensure_session()
+        payload = {
+            "model": self._model,
+            "max_tokens": 200,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+        async with session.post(self._URL, json=payload) as resp:
+            data = await resp.json()
+            return data["content"][0]["text"]
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+
+class GeminiProvider(LLMProvider):
+    """Google Gemini provider via the REST generateContent API.
+
+    Uses the v1beta endpoint with API key auth (no OAuth needed).
+    """
+
+    _URL_TEMPLATE = (
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}"
+        ":generateContent?key={key}"
+    )
+
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash") -> None:
+        import aiohttp
+
+        self._api_key = api_key
+        self._model = model
+        self._session: aiohttp.ClientSession | None = None
+        self._url = self._URL_TEMPLATE.format(model=self._model, key=self._api_key)
+
+    async def _ensure_session(self) -> "aiohttp.ClientSession":
+        import aiohttp
+
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def query(self, prompt: str) -> str:
+        session = await self._ensure_session()
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "maxOutputTokens": 200,
+                "temperature": 0.0,
+            },
+        }
+
+        async with session.post(self._url, json=payload) as resp:
+            data = await resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+
 # ---------------------------------------------------------------------------
 # Narrative Agent
 # ---------------------------------------------------------------------------
@@ -117,6 +206,17 @@ class NarrativeAgent(BaseAgent):
 
     @staticmethod
     def _default_llm(settings: AppSettings) -> LLMProvider:
+        provider = settings.LLM_PROVIDER.lower()
+        if provider == "anthropic":
+            return AnthropicProvider(
+                api_key=settings.ANTHROPIC_API_KEY,
+                model=settings.ANTHROPIC_MODEL,
+            )
+        if provider == "gemini":
+            return GeminiProvider(
+                api_key=settings.GEMINI_API_KEY,
+                model=settings.GEMINI_MODEL,
+            )
         return OpenAIProvider(api_key=settings.LLM_API_KEY, model=settings.LLM_MODEL)
 
     # ------------------------------------------------------------------
