@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import datetime
 from typing import Any
 
@@ -16,6 +17,7 @@ from core.schemas import (
     ContextStatus,
     GameState,
     MarketState,
+    PortfolioState,
     Side,
     Signal,
     SignalStatus,
@@ -59,13 +61,16 @@ class NBAQuantAgent(BaseAgent):
             self._load_reversal_table()
         )
 
+        # Portfolio state from the executor (updated via portfolio:state channel)
+        self._portfolio: PortfolioState | None = None
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
         await self.bus.subscribe(
-            ["game:state", "market:state"], self._on_message
+            ["game:state", "market:state", "portfolio:state"], self._on_message
         )
 
     async def _on_message(self, channel: str, data: dict[str, Any]) -> None:
@@ -73,6 +78,9 @@ class NBAQuantAgent(BaseAgent):
             self._update_game(data)
         elif channel == "market:state":
             self._update_market(data)
+        elif channel == "portfolio:state":
+            self._update_portfolio(data)
+            return
         await self._evaluate_all()
 
     # ------------------------------------------------------------------
@@ -92,6 +100,12 @@ class NBAQuantAgent(BaseAgent):
             self._markets[ms.ticker] = ms
         except Exception:
             self.log.warning("Bad market:state payload: {}", data)
+
+    def _update_portfolio(self, data: dict) -> None:
+        try:
+            self._portfolio = PortfolioState(**data)
+        except Exception:
+            self.log.warning("Bad portfolio:state payload: {}", data)
 
     # ------------------------------------------------------------------
     # Core evaluation — no external I/O in the hot path
@@ -129,25 +143,98 @@ class NBAQuantAgent(BaseAgent):
 
         exit_price = entry_price_cents + self.settings.TARGET_EXIT_SPREAD
 
-        signal = Signal(
-            ticker=market.ticker,
-            action=Action.BUY,
-            side=Side.YES,
-            status=SignalStatus.VALIDATED,
-            confidence=min(model_prob, 1.0),
-            source=self.name,
-            ev_estimate=ev,
-            entry_price=entry_price_cents,
-            exit_price=exit_price,
-            game_id=game.game_id,
-        )
+        if self._can_fund_trade(entry_price_cents):
+            signal = Signal(
+                ticker=market.ticker,
+                action=Action.BUY,
+                side=Side.YES,
+                status=SignalStatus.VALIDATED,
+                confidence=min(model_prob, 1.0),
+                source=self.name,
+                ev_estimate=ev,
+                entry_price=entry_price_cents,
+                exit_price=exit_price,
+                game_id=game.game_id,
+            )
+            await self.bus.publish("signal:validated", signal)
+            self.log.info(
+                "+EV signal: {} EV={:.4f} entry={} exit={} model_p={:.3f} implied_p={:.3f}",
+                market.ticker, ev, entry_price_cents, exit_price,
+                model_prob, implied_prob,
+            )
+        else:
+            await self._try_reallocate(ev, entry_price_cents, model_prob, market, game)
 
-        await self.bus.publish("signal:validated", signal)
-        self.log.info(
-            "+EV signal: {} EV={:.4f} entry={} exit={} model_p={:.3f} implied_p={:.3f}",
-            market.ticker, ev, entry_price_cents, exit_price,
-            model_prob, implied_prob,
-        )
+    # ------------------------------------------------------------------
+    # Capital awareness
+    # ------------------------------------------------------------------
+
+    def _can_fund_trade(self, entry_price_cents: int) -> bool:
+        """Check if the cached bankroll can fund at least 1 contract."""
+        if self._portfolio is None:
+            return True
+        bankroll_cents = self._portfolio.bankroll * 100
+        return bankroll_cents >= entry_price_cents
+
+    async def _try_reallocate(
+        self,
+        new_ev: float,
+        new_entry_price: int,
+        model_prob: float,
+        market: MarketState,
+        game: GameState,
+    ) -> None:
+        """Evaluate whether liquidating a resting exit frees enough capital
+        to fund a strictly better trade (unit-correct hurdle rate)."""
+        if self._portfolio is None or not self._portfolio.positions:
+            return
+
+        for pos in self._portfolio.positions:
+            ms = self._markets.get(pos.ticker)
+            if ms is None:
+                continue
+
+            live_bid = ms.yes_bid
+
+            if live_bid < self.settings.MIN_REALLOCATE_BID:
+                continue
+
+            freed_capital_cents = live_bid * pos.remaining_count
+            expected_new_count = math.floor(
+                freed_capital_cents * self.settings.KELLY_FRACTION / new_entry_price
+            ) if new_entry_price > 0 else 0
+            if expected_new_count < 1:
+                continue
+
+            total_new_ev_cents = expected_new_count * (new_ev * 100)
+
+            foregone_profit = (pos.target_exit_price - live_bid) * pos.remaining_count
+            fees = pos.remaining_count * self.settings.TAKER_FEE_CENTS
+
+            if total_new_ev_cents <= foregone_profit + fees:
+                continue
+
+            signal = Signal(
+                ticker=pos.ticker,
+                action=Action.SELL,
+                side=pos.side,
+                status=SignalStatus.REALLOCATE,
+                confidence=min(model_prob, 1.0),
+                source=self.name,
+                ev_estimate=new_ev,
+                entry_price=live_bid,
+                exit_price=pos.target_exit_price,
+                game_id=game.game_id,
+                target_order_id=pos.client_order_id,
+            )
+            await self.bus.publish("signal:reallocate", signal)
+            self.log.info(
+                "REALLOCATE: liquidate {} x{} @{} (foregone={:.0f}c, fees={:.0f}c) "
+                "for new EV={:.0f}c on {}",
+                pos.ticker, pos.remaining_count, live_bid,
+                foregone_profit, fees, total_new_ev_cents, market.ticker,
+            )
+            return
 
     # ------------------------------------------------------------------
     # Probability model

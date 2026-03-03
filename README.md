@@ -228,3 +228,5 @@ The core infrastructure (Redis bus, Kalshi client, executor) is sport-agnostic.
 - **Fill-before-sell**: exit orders only dispatch after Kalshi fill confirmation.
 - **Incremental exits**: partial fills are hedged immediately, not after full fill.
 - **VWAP P&L**: kill switch uses actual execution prices, not limit prices.
+- **Reallocation hurdle**: new trade's total projected EV must strictly exceed foregone profit + taker fees before liquidating a resting exit.
+- **Order-level targeting**: reallocation uses `target_order_id`, not ticker matching, to handle partial-fill batches correctly.

@@ -1,4 +1,4 @@
-"""Tests for OrderExecutor: Kelly sizing, kill switch, fill lifecycle, VWAP, GC."""
+"""Tests for OrderExecutor: Kelly sizing, kill switch, fill lifecycle, VWAP, GC, reallocation."""
 from __future__ import annotations
 
 import math
@@ -332,3 +332,85 @@ class TestGarbageCollection:
             executor._orders.pop(cid, None)
 
         assert len(executor._orders) == 3
+
+
+# ===========================================================================
+# Reallocation — cancel resting exit + aggressive sell
+# ===========================================================================
+
+class TestReallocate:
+
+    @pytest.mark.asyncio
+    async def test_reallocate_cancels_and_places_aggressive_sell(self, executor):
+        """REALLOCATE should cancel the targeted resting exit, sleep, then
+        place an aggressive limit sell at the bid price."""
+        exit_order = make_order(
+            action=Action.SELL, count=50, yes_price=25, client_order_id="exit-target"
+        )
+        exit_managed = make_managed_order(
+            order=exit_order,
+            state=OrderState.RESTING,
+            is_exit=True,
+            parent_entry_id="entry-parent",
+        )
+        exit_managed.kalshi_order_id = "kalshi-exit-target"
+        executor._orders["exit-target"] = exit_managed
+
+        signal = make_signal(
+            ticker="NBA-YES-LAL",
+            status=SignalStatus.REALLOCATE,
+            entry_price=95,
+        )
+        signal_data = signal.model_dump(mode="json")
+        signal_data["target_order_id"] = "exit-target"
+
+        with patch("agents.executor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await executor._on_signal("signal:reallocate", signal_data)
+            mock_sleep.assert_called_once_with(0.5)
+
+        executor.client.cancel_order.assert_called_once_with("kalshi-exit-target")
+        assert exit_managed.state == OrderState.CANCELED
+
+        executor.client.place_order.assert_called_once()
+        placed = executor.client.place_order.call_args[0][0]
+        assert placed.action == Action.SELL
+        assert placed.yes_price == 95
+        assert placed.count == 50
+
+    @pytest.mark.asyncio
+    async def test_reallocate_unknown_target_is_noop(self, executor):
+        """REALLOCATE for a target_order_id not in _orders does nothing."""
+        signal = make_signal(status=SignalStatus.REALLOCATE, entry_price=95)
+        signal_data = signal.model_dump(mode="json")
+        signal_data["target_order_id"] = "nonexistent-id"
+
+        await executor._on_signal("signal:reallocate", signal_data)
+
+        executor.client.cancel_order.assert_not_called()
+        executor.client.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reallocate_targets_specific_order_not_ticker(self, executor):
+        """With multiple resting exits for the same ticker, only the
+        targeted one should be canceled."""
+        for cid in ("exit-A", "exit-B", "exit-C"):
+            order = make_order(
+                action=Action.SELL, count=30, yes_price=25, client_order_id=cid
+            )
+            managed = make_managed_order(
+                order=order, state=OrderState.RESTING, is_exit=True, parent_entry_id="entry-1"
+            )
+            managed.kalshi_order_id = f"kalshi-{cid}"
+            executor._orders[cid] = managed
+
+        signal = make_signal(status=SignalStatus.REALLOCATE, entry_price=95)
+        signal_data = signal.model_dump(mode="json")
+        signal_data["target_order_id"] = "exit-B"
+
+        with patch("agents.executor.asyncio.sleep", new_callable=AsyncMock):
+            await executor._on_signal("signal:reallocate", signal_data)
+
+        executor.client.cancel_order.assert_called_once_with("kalshi-exit-B")
+        assert executor._orders["exit-A"].state == OrderState.RESTING
+        assert executor._orders["exit-B"].state == OrderState.CANCELED
+        assert executor._orders["exit-C"].state == OrderState.RESTING

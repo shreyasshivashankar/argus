@@ -29,6 +29,7 @@ console = Console()
 _CHANNELS = [
     "signal:validated",
     "signal:executed",
+    "signal:reallocate",
     "signal:heartbeat",
     "game:state",
     "market:state",
@@ -89,6 +90,17 @@ class ArgusMonitor:
                 "type": "+EV SIGNAL",
                 "ticker": data.get("ticker", "?"),
                 "details": f"EV: +${ev:.4f}  Conf: {conf:.2f}",
+                "pnl": 0.0,
+            })
+
+        elif channel == "signal:reallocate":
+            target = data.get("target_order_id", "?")
+            bid = data.get("entry_price", 0)
+            self.trades.insert(0, {
+                "time": now,
+                "type": "REALLOCATE",
+                "ticker": data.get("ticker", "?"),
+                "details": f"Liq @{bid}c  target={target}",
                 "pnl": 0.0,
             })
 

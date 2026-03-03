@@ -18,6 +18,7 @@ class SignalStatus(StrEnum):
     VALIDATED = "VALIDATED"
     VETOED = "VETOED"
     EXECUTED = "EXECUTED"
+    REALLOCATE = "REALLOCATE"
 
 
 class ContextStatus(StrEnum):
@@ -77,9 +78,11 @@ class MarketState(BaseModel):
 
 
 class Signal(BaseModel):
-    """Trade signal that flows through the Redis bus lifecycle."""
+    """Trade signal that flows through the Redis bus lifecycle.
 
-    model_config = ConfigDict(strict=True)
+    Strict mode is disabled because signals are deserialized from JSON
+    strings via Redis Pub/Sub (enums arrive as str, timestamps as ISO str).
+    """
 
     ticker: str
     action: Action
@@ -92,6 +95,7 @@ class Signal(BaseModel):
     exit_price: int
     game_id: str
     veto_reason: Optional[str] = None
+    target_order_id: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     signal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
@@ -127,6 +131,29 @@ class ManagedOrder(BaseModel):
     parent_entry_id: Optional[str] = None
     vwap_cents: float = 0.0
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class PortfolioPosition(BaseModel):
+    """A resting exit order visible to the reallocation engine."""
+
+    model_config = ConfigDict(strict=True, frozen=True)
+
+    client_order_id: str
+    ticker: str
+    side: Side
+    remaining_count: int
+    entry_vwap: float
+    target_exit_price: int
+    kalshi_order_id: str
+
+
+class PortfolioState(BaseModel):
+    """Snapshot of the executor's active portfolio, published to Redis."""
+
+    model_config = ConfigDict(strict=True)
+
+    bankroll: float
+    positions: list[PortfolioPosition] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -182,3 +209,7 @@ class AppSettings(BaseSettings):
     # Order GC: how often to sweep (seconds) and max age of terminal orders (seconds)
     ORDER_GC_INTERVAL: float = 300.0
     ORDER_GC_TTL: float = 7200.0
+
+    # Capital rebalancing
+    MIN_REALLOCATE_BID: int = 90
+    TAKER_FEE_CENTS: float = 2.0

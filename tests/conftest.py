@@ -17,6 +17,8 @@ from core.schemas import (
     MarketState,
     Order,
     OrderState,
+    PortfolioPosition,
+    PortfolioState,
     Side,
     Signal,
     SignalStatus,
@@ -189,6 +191,38 @@ def make_market_state(
         no_ask=0,
         volume=100,
         timestamp=datetime.utcnow(),
+    )
+
+
+def make_portfolio_position(
+    *,
+    client_order_id: str = "exit-001",
+    ticker: str = "NBA-YES-LAL",
+    side: Side = Side.YES,
+    remaining_count: int = 100,
+    entry_vwap: float = 15.0,
+    target_exit_price: int = 22,
+    kalshi_order_id: str = "kalshi-exit-001",
+) -> PortfolioPosition:
+    return PortfolioPosition(
+        client_order_id=client_order_id,
+        ticker=ticker,
+        side=side,
+        remaining_count=remaining_count,
+        entry_vwap=entry_vwap,
+        target_exit_price=target_exit_price,
+        kalshi_order_id=kalshi_order_id,
+    )
+
+
+def make_portfolio_state(
+    *,
+    bankroll: float = 0.50,
+    positions: list[PortfolioPosition] | None = None,
+) -> PortfolioState:
+    return PortfolioState(
+        bankroll=bankroll,
+        positions=positions or [],
     )
 
 

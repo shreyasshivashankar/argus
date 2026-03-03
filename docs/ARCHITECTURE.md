@@ -214,3 +214,25 @@ Key behaviors:
 - **Half-Kelly default** -- conservative position sizing to survive variance
 - **Pluggable interfaces** -- `SportsFeed` and `LLMProvider` are ABCs, swap providers by subclassing
 - **Balldontlie is research-only** -- never used for live trading, only historical backtest data
+
+## Capital Rebalancing (Opportunity Cost Engine)
+
+When the Quant Agent detects a +EV anomaly but the bankroll is insufficient, it evaluates whether liquidating an existing deep-in-the-money position would yield strictly more profit than holding it.
+
+**Signal flow:**
+
+1. `OrderExecutor` publishes `portfolio:state` (bankroll + resting exits) to Redis every balance poll interval
+2. `NBAQuantAgent` subscribes to `portfolio:state` and caches it locally
+3. On a new +EV signal with insufficient bankroll, the quant agent evaluates each resting exit:
+   - Only positions with `live_bid >= MIN_REALLOCATE_BID` (default 90c) are considered
+   - Calculates freed capital and projects a Kelly-sized new trade count
+   - Compares `total_new_ev_cents` against `foregone_profit + taker_fees`
+4. If the hurdle clears, publishes `Signal(status=REALLOCATE, target_order_id=...)` to `signal:reallocate`
+5. `OrderExecutor` cancels the specific resting exit by `target_order_id`, waits 500ms for exchange inventory settlement, then places an aggressive limit sell at the current bid
+
+**Invariants:**
+
+- Hurdle rate is unit-correct: total projected EV (from freed capital) vs total foregone profit + fees
+- `target_order_id` ensures exact order targeting when multiple partial-fill exits exist for the same ticker
+- 500ms settle delay between cancel and aggressive sell prevents Kalshi 400 errors from insufficient inventory
+- The new buy signal is NOT published during reallocation -- the next WS tick naturally re-detects the anomaly once capital frees up

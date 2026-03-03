@@ -16,8 +16,11 @@ from core.schemas import (
     ManagedOrder,
     Order,
     OrderState,
+    PortfolioPosition,
+    PortfolioState,
     Signal,
     SignalStatus,
+    Side,
 )
 
 
@@ -67,7 +70,9 @@ class OrderExecutor(BaseAgent):
     async def run(self) -> None:
         balance_task = asyncio.create_task(self._balance_poll_loop())
         signal_task = asyncio.create_task(
-            self.bus.subscribe(["signal:validated"], self._on_signal)
+            self.bus.subscribe(
+                ["signal:validated", "signal:reallocate"], self._on_signal
+            )
         )
         gc_task = asyncio.create_task(self._gc_loop())
         await asyncio.gather(balance_task, signal_task, gc_task)
@@ -83,7 +88,31 @@ class OrderExecutor(BaseAgent):
                 self.log.debug("Bankroll cached: ${:.2f}", self.current_bankroll)
             except Exception:
                 self.log.exception("Balance poll failed")
+
+            await self._publish_portfolio()
             await asyncio.sleep(self.settings.BALANCE_POLL_INTERVAL)
+
+    async def _publish_portfolio(self) -> None:
+        """Build a PortfolioState snapshot and publish to portfolio:state."""
+        resting_states = {OrderState.PLACED, OrderState.RESTING}
+        positions: list[PortfolioPosition] = []
+        for cid, managed in self._orders.items():
+            if not managed.is_exit or managed.state not in resting_states:
+                continue
+            entry = self._orders.get(managed.parent_entry_id or "")
+            entry_vwap = entry.vwap_cents if entry else 0.0
+            exit_price = managed.order.yes_price or managed.order.no_price or 0
+            positions.append(PortfolioPosition(
+                client_order_id=cid,
+                ticker=managed.order.ticker,
+                side=managed.order.side,
+                remaining_count=managed.order.count,
+                entry_vwap=entry_vwap,
+                target_exit_price=exit_price,
+                kalshi_order_id=managed.kalshi_order_id or "",
+            ))
+        state = PortfolioState(bankroll=self.current_bankroll, positions=positions)
+        await self.bus.publish("portfolio:state", state)
 
     # ------------------------------------------------------------------
     # Order garbage collection
@@ -113,19 +142,19 @@ class OrderExecutor(BaseAgent):
 
     async def _on_signal(self, _channel: str, data: dict[str, Any]) -> None:
         try:
-            signal = Signal(**data)
+            signal = Signal.model_validate(data)
         except Exception:
             self.log.warning("Bad signal payload: {}", data)
-            return
-
-        if signal.status != SignalStatus.VALIDATED:
             return
 
         if self._kill_switch_tripped:
             self.log.warning("Kill switch active — dropping signal {}", signal.signal_id)
             return
 
-        await self._execute_entry(signal)
+        if signal.status == SignalStatus.VALIDATED:
+            await self._execute_entry(signal)
+        elif signal.status == SignalStatus.REALLOCATE:
+            await self._execute_reallocate(signal)
 
     # ------------------------------------------------------------------
     # Entry order
@@ -168,6 +197,74 @@ class OrderExecutor(BaseAgent):
             self.log.exception("Failed to place entry for {}", signal.ticker)
             managed.state = OrderState.CANCELED
             return
+
+        await self._replay_deferred_fills()
+
+    # ------------------------------------------------------------------
+    # Reallocation (liquidate resting exit to free capital)
+    # ------------------------------------------------------------------
+
+    async def _execute_reallocate(self, signal: Signal) -> None:
+        """Cancel a resting exit and immediately cross the spread to sell.
+
+        The quant agent sets signal.target_order_id to the specific resting
+        exit's client_order_id, and signal.entry_price to the current bid
+        (the aggressive sell price).
+        """
+        target_id = signal.target_order_id
+        if not target_id or target_id not in self._orders:
+            self.log.warning("REALLOCATE: unknown target_order_id {}", target_id)
+            return
+
+        managed = self._orders[target_id]
+        if not managed.is_exit or not managed.kalshi_order_id:
+            self.log.warning("REALLOCATE: target {} is not a resting exit", target_id)
+            return
+
+        try:
+            await self.client.cancel_order(managed.kalshi_order_id)
+            managed.state = OrderState.CANCELED
+            self.log.info(
+                "REALLOCATE: canceled resting exit {} (kalshi={})",
+                target_id, managed.kalshi_order_id,
+            )
+        except Exception:
+            self.log.exception("REALLOCATE: failed to cancel {}", managed.kalshi_order_id)
+            return
+
+        # P2 fix: let the exchange release inventory before placing the new sell
+        await asyncio.sleep(0.5)
+
+        aggressive_price = signal.entry_price
+        sell_order = Order(
+            ticker=managed.order.ticker,
+            action=Action.SELL,
+            side=managed.order.side,
+            count=managed.order.count,
+            yes_price=aggressive_price if managed.order.side == Side.YES else None,
+            no_price=aggressive_price if managed.order.side == Side.NO else None,
+        )
+
+        sell_managed = ManagedOrder(
+            order=sell_order,
+            state=OrderState.PLACED,
+            signal_id=managed.signal_id,
+            is_exit=True,
+            parent_entry_id=managed.parent_entry_id,
+        )
+        self._orders[sell_order.client_order_id] = sell_managed
+
+        try:
+            resp = await self.client.place_order(sell_order)
+            kalshi_id = resp.get("order", {}).get("order_id", "")
+            sell_managed.kalshi_order_id = kalshi_id
+            self._kalshi_to_client[kalshi_id] = sell_order.client_order_id
+            self.log.info(
+                "REALLOCATE: aggressive sell placed {} x{} @{} (kalshi={})",
+                sell_order.ticker, sell_order.count, aggressive_price, kalshi_id,
+            )
+        except Exception:
+            self.log.exception("REALLOCATE: failed to place aggressive sell")
 
         await self._replay_deferred_fills()
 
