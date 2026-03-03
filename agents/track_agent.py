@@ -164,7 +164,7 @@ class TrackAgent(BaseAgent):
                 await self._db.execute(
                     """UPDATE trades
                        SET status = 'EXECUTED',
-                           pnl_dollars = ?,
+                           pnl_dollars = pnl_dollars + ?,
                            entry_price = ?,
                            exit_price = ?
                        WHERE signal_id = ?""",

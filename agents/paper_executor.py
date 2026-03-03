@@ -84,7 +84,8 @@ class PaperExecutor(BaseAgent):
         market_task = asyncio.create_task(
             self.bus.subscribe(["market:state"], self._on_market_update)
         )
-        await asyncio.gather(balance_task, signal_task, market_task)
+        gc_task = asyncio.create_task(self._gc_loop())
+        await asyncio.gather(balance_task, signal_task, market_task, gc_task)
 
     # ------------------------------------------------------------------
     # Background bankroll cache (same as production)
@@ -205,6 +206,30 @@ class PaperExecutor(BaseAgent):
                 abs(self._daily_realized_pnl),
                 self.settings.DAILY_STOP_LOSS_USD,
             )
+
+    # ------------------------------------------------------------------
+    # Garbage collection for orphaned resting exits
+    # ------------------------------------------------------------------
+
+    async def _gc_loop(self) -> None:
+        """Evict resting exits older than ORDER_GC_TTL to prevent memory leaks."""
+        while self._running:
+            await asyncio.sleep(self.settings.ORDER_GC_INTERVAL)
+            now = datetime.utcnow()
+            stale = [
+                pid for pid, pos in self._resting_exits.items()
+                if not pos.filled
+                and (now - pos.entry_time).total_seconds() > self.settings.ORDER_GC_TTL
+            ]
+            for pid in stale:
+                pos = self._resting_exits.pop(pid)
+                self.log.info(
+                    "[PAPER] GC: evicted stale exit {} @{} (age={:.0f}s)",
+                    pos.ticker, pos.exit_target,
+                    (now - pos.entry_time).total_seconds(),
+                )
+            if stale:
+                self.log.debug("[PAPER] GC: evicted {} stale positions", len(stale))
 
     # ------------------------------------------------------------------
     # Kelly criterion (identical to production OrderExecutor)
