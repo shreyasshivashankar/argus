@@ -1,0 +1,13 @@
+kalshi-python-async>=2.0.0
+pydantic>=2.0.0
+pydantic-settings
+redis[hiredis]>=5.0.0
+uvloop
+websockets
+aiohttp
+pandas
+numpy
+loguru
+python-dotenv
+telegram-send
+cryptography
