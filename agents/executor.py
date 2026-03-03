@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-import subprocess
 from datetime import datetime, timezone
 from typing import Any
 
@@ -53,6 +52,10 @@ class OrderExecutor(BaseAgent):
         # Reverse lookup: kalshi_order_id → client_order_id
         self._kalshi_to_client: dict[str, str] = {}
 
+        # Deferred fills: fills that arrived before place_order returned.
+        # Keyed by kalshi_order_id so they can be replayed once the mapping exists.
+        self._deferred_fills: list[dict[str, Any]] = []
+
         # Daily P&L tracking
         self._daily_realized_pnl: float = 0.0
         self._kill_switch_tripped: bool = False
@@ -66,7 +69,8 @@ class OrderExecutor(BaseAgent):
         signal_task = asyncio.create_task(
             self.bus.subscribe(["signal:validated"], self._on_signal)
         )
-        await asyncio.gather(balance_task, signal_task)
+        gc_task = asyncio.create_task(self._gc_loop())
+        await asyncio.gather(balance_task, signal_task, gc_task)
 
     # ------------------------------------------------------------------
     # Background bankroll cache
@@ -80,6 +84,28 @@ class OrderExecutor(BaseAgent):
             except Exception:
                 self.log.exception("Balance poll failed")
             await asyncio.sleep(self.settings.BALANCE_POLL_INTERVAL)
+
+    # ------------------------------------------------------------------
+    # Order garbage collection
+    # ------------------------------------------------------------------
+
+    async def _gc_loop(self) -> None:
+        """Periodically evict terminal orders older than ORDER_GC_TTL seconds."""
+        terminal_states = {OrderState.FILLED, OrderState.CANCELED}
+        while self._running:
+            await asyncio.sleep(self.settings.ORDER_GC_INTERVAL)
+            now = datetime.utcnow()
+            stale = [
+                cid for cid, m in self._orders.items()
+                if m.state in terminal_states
+                and (now - m.created_at).total_seconds() > self.settings.ORDER_GC_TTL
+            ]
+            for cid in stale:
+                managed = self._orders.pop(cid, None)
+                if managed and managed.kalshi_order_id:
+                    self._kalshi_to_client.pop(managed.kalshi_order_id, None)
+            if stale:
+                self.log.debug("GC: evicted {} terminal orders", len(stale))
 
     # ------------------------------------------------------------------
     # Signal handling
@@ -143,30 +169,45 @@ class OrderExecutor(BaseAgent):
             managed.state = OrderState.CANCELED
             return
 
+        await self._replay_deferred_fills()
+
     # ------------------------------------------------------------------
     # Fill callback (registered by main.py on the KalshiFeedWatcher)
     # ------------------------------------------------------------------
 
     async def on_fill(self, msg: dict[str, Any]) -> None:
-        """Handle a fill event from the Kalshi WS fill channel."""
-        order_id = msg.get("order_id", "")
-        client_id = (
-            msg.get("client_order_id")
-            or self._kalshi_to_client.get(order_id, "")
-        )
+        """Handle a fill event from the Kalshi WS fill channel.
+
+        Resolves by client_order_id first (always present if Kalshi echoes it),
+        then falls back to kalshi_order_id lookup.  If neither resolves (fill
+        arrived before place_order returned), the fill is deferred and replayed
+        once the mapping is established.
+        """
+        client_id = msg.get("client_order_id", "")
+        if not client_id or client_id not in self._orders:
+            order_id = msg.get("order_id", "")
+            client_id = self._kalshi_to_client.get(order_id, "")
 
         managed = self._orders.get(client_id)
         if managed is None:
+            self._deferred_fills.append(msg)
+            self.log.debug("Deferred fill (no mapping yet): {}", msg.get("order_id"))
             return
 
         fill_count = int(msg.get("count", 0))
         fill_price = int(msg.get("yes_price", 0))
-        post_position = int(msg.get("post_position", 0))
 
+        prev_fill_count = managed.fill_count
         managed.fill_count += fill_count
         managed.remaining_count = max(
             managed.order.count - managed.fill_count, 0
         )
+
+        # Update VWAP: weighted average of execution prices
+        if managed.fill_count > 0:
+            managed.vwap_cents = (
+                (managed.vwap_cents * prev_fill_count) + (fill_price * fill_count)
+            ) / managed.fill_count
 
         if managed.remaining_count == 0:
             managed.state = OrderState.FILLED
@@ -174,18 +215,24 @@ class OrderExecutor(BaseAgent):
             managed.state = OrderState.PARTIALLY_FILLED
 
         self.log.info(
-            "Fill on {}: +{} @{} (total filled={}/{})",
+            "Fill on {}: +{} @{} (total filled={}/{}, vwap={:.1f})",
             managed.order.ticker, fill_count, fill_price,
-            managed.fill_count, managed.order.count,
+            managed.fill_count, managed.order.count, managed.vwap_cents,
         )
 
-        # If this is an entry order that just filled → place the exit
-        if managed.state == OrderState.FILLED and not managed.paired_exit_order_id:
-            await self._place_exit(managed)
+        if managed.is_exit:
+            await self._trade_complete(managed, fill_count, fill_price)
+        elif fill_count > 0:
+            await self._place_exit(managed, fill_count)
 
-        # If this is an exit order that just filled → trade complete
-        if managed.paired_exit_order_id and managed.state == OrderState.FILLED:
-            await self._trade_complete(managed, fill_price)
+    async def _replay_deferred_fills(self) -> None:
+        """Replay any fills that arrived before place_order returned."""
+        if not self._deferred_fills:
+            return
+        pending = self._deferred_fills[:]
+        self._deferred_fills.clear()
+        for fill_msg in pending:
+            await self.on_fill(fill_msg)
 
     async def on_order_update(self, msg: dict[str, Any]) -> None:
         """Handle an order status update from the Kalshi WS user_orders channel.
@@ -212,8 +259,12 @@ class OrderExecutor(BaseAgent):
     # Exit order (only after fill confirms inventory)
     # ------------------------------------------------------------------
 
-    async def _place_exit(self, entry: ManagedOrder) -> None:
-        """Place the paired limit sell at TARGET_EXIT_SPREAD above entry."""
+    async def _place_exit(self, entry: ManagedOrder, batch_count: int) -> None:
+        """Place a paired limit sell for a specific fill batch.
+
+        Called on every fill event, not just full fill, so partial fills
+        are hedged immediately instead of waiting for the full order.
+        """
         exit_price = entry.order.yes_price or entry.order.no_price or 0
         exit_price += self.settings.TARGET_EXIT_SPREAD - self.settings.SLIPPAGE_TICKS
 
@@ -221,7 +272,7 @@ class OrderExecutor(BaseAgent):
             ticker=entry.order.ticker,
             action=Action.SELL,
             side=entry.order.side,
-            count=entry.fill_count,
+            count=batch_count,
             yes_price=exit_price if entry.order.side == "yes" else None,
             no_price=exit_price if entry.order.side == "no" else None,
         )
@@ -230,9 +281,11 @@ class OrderExecutor(BaseAgent):
             order=exit_order,
             state=OrderState.PLACED,
             signal_id=entry.signal_id,
+            is_exit=True,
+            parent_entry_id=entry.order.client_order_id,
         )
         self._orders[exit_order.client_order_id] = exit_managed
-        entry.paired_exit_order_id = exit_order.client_order_id
+        entry.paired_exit_order_ids.append(exit_order.client_order_id)
 
         try:
             resp = await self.client.place_order(exit_order)
@@ -241,50 +294,52 @@ class OrderExecutor(BaseAgent):
             self._kalshi_to_client[kalshi_id] = exit_order.client_order_id
             self.log.info(
                 "Exit placed: {} SELL x{} @{} (kalshi_id={})",
-                exit_order.ticker, exit_order.count, exit_price, kalshi_id,
+                exit_order.ticker, batch_count, exit_price, kalshi_id,
             )
         except Exception:
             self.log.exception("Failed to place exit for {}", exit_order.ticker)
+
+        await self._replay_deferred_fills()
 
     # ------------------------------------------------------------------
     # Trade completion + P&L
     # ------------------------------------------------------------------
 
-    async def _trade_complete(self, exit_managed: ManagedOrder, exit_price: int) -> None:
-        entry_id = None
-        for cid, m in self._orders.items():
-            if m.paired_exit_order_id == exit_managed.order.client_order_id:
-                entry_id = cid
-                break
+    async def _trade_complete(
+        self, exit_managed: ManagedOrder, batch_count: int, fill_price: int
+    ) -> None:
+        """Called on each exit fill. Computes P&L from execution VWAPs, not limit prices."""
+        entry_vwap = 0.0
+        if exit_managed.parent_entry_id:
+            entry = self._orders.get(exit_managed.parent_entry_id)
+            if entry:
+                entry_vwap = entry.vwap_cents
 
-        entry_price = 0
-        if entry_id:
-            entry_managed = self._orders[entry_id]
-            entry_price = entry_managed.order.yes_price or entry_managed.order.no_price or 0
-
-        pnl_cents = (exit_price - entry_price) * exit_managed.fill_count
+        pnl_cents = (fill_price - entry_vwap) * batch_count
         pnl_dollars = pnl_cents / 100.0
         self._daily_realized_pnl += pnl_dollars
 
         self.log.info(
-            "Trade complete: {} P&L=${:.2f} (daily=${:.2f})",
-            exit_managed.order.ticker, pnl_dollars, self._daily_realized_pnl,
+            "Exit fill: {} x{} @{} (entry vwap={:.1f}) P&L=${:.2f} (daily=${:.2f})",
+            exit_managed.order.ticker, batch_count, fill_price,
+            entry_vwap, pnl_dollars, self._daily_realized_pnl,
         )
 
-        signal = Signal(
-            ticker=exit_managed.order.ticker,
-            action=Action.SELL,
-            side=exit_managed.order.side,
-            status=SignalStatus.EXECUTED,
-            confidence=1.0,
-            source=self.name,
-            ev_estimate=pnl_dollars,
-            entry_price=entry_price,
-            exit_price=exit_price,
-            game_id="",
-            signal_id=exit_managed.signal_id,
-        )
-        await self.bus.publish("signal:executed", signal)
+        if exit_managed.state == OrderState.FILLED:
+            signal = Signal(
+                ticker=exit_managed.order.ticker,
+                action=Action.SELL,
+                side=exit_managed.order.side,
+                status=SignalStatus.EXECUTED,
+                confidence=1.0,
+                source=self.name,
+                ev_estimate=pnl_dollars,
+                entry_price=int(entry_vwap),
+                exit_price=int(exit_managed.vwap_cents),
+                game_id="",
+                signal_id=exit_managed.signal_id,
+            )
+            await self.bus.publish("signal:executed", signal)
 
         await self._check_kill_switch()
 

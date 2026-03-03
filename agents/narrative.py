@@ -30,19 +30,32 @@ class LLMProvider(ABC):
 
 
 class OpenAIProvider(LLMProvider):
-    """OpenAI-compatible LLM provider (GPT-4o-mini, etc.)."""
+    """OpenAI-compatible LLM provider (GPT-4o-mini, etc.).
+
+    Reuses a single aiohttp.ClientSession for the lifetime of the provider
+    to avoid repeated SSL/TLS handshake overhead.
+    """
 
     def __init__(self, api_key: str, model: str = "gpt-4o-mini") -> None:
-        self._api_key = api_key
-        self._model = model
-
-    async def query(self, prompt: str) -> str:
         import aiohttp
 
-        headers = {
+        self._api_key = api_key
+        self._model = model
+        self._session: aiohttp.ClientSession | None = None
+        self._headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
+
+    async def _ensure_session(self) -> "aiohttp.ClientSession":
+        import aiohttp
+
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(headers=self._headers)
+        return self._session
+
+    async def query(self, prompt: str) -> str:
+        session = await self._ensure_session()
         payload = {
             "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
@@ -50,14 +63,16 @@ class OpenAIProvider(LLMProvider):
             "temperature": 0.0,
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
-                json=payload,
-            ) as resp:
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"]
+        async with session.post(
+            "https://api.openai.com/v1/chat/completions",
+            json=payload,
+        ) as resp:
+            data = await resp.json()
+            return data["choices"][0]["message"]["content"]
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
 
 
 # ---------------------------------------------------------------------------

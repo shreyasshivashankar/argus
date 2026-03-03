@@ -121,8 +121,12 @@ class ManagedOrder(BaseModel):
     kalshi_order_id: Optional[str] = None
     fill_count: int = 0
     remaining_count: int = 0
-    paired_exit_order_id: Optional[str] = None
+    paired_exit_order_ids: list[str] = Field(default_factory=list)
     signal_id: str = ""
+    is_exit: bool = False
+    parent_entry_id: Optional[str] = None
+    vwap_cents: float = 0.0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 # ---------------------------------------------------------------------------
@@ -169,3 +173,7 @@ class AppSettings(BaseSettings):
 
     # EV threshold (cents) to trigger a trade signal
     EV_THRESHOLD: float = 3.0
+
+    # Order GC: how often to sweep (seconds) and max age of terminal orders (seconds)
+    ORDER_GC_INTERVAL: float = 300.0
+    ORDER_GC_TTL: float = 7200.0
