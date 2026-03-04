@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 logs/
 data/*.json
+data/*.db
+data/*.db-shm
+data/*.db-wal
 core_execution/
 core_research/
 .venv/
