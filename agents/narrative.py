@@ -150,7 +150,7 @@ class GeminiProvider(LLMProvider):
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "maxOutputTokens": 1024,
+                "maxOutputTokens": 2048,
                 "temperature": 0.0,
             },
         }
