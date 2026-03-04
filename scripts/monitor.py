@@ -126,8 +126,8 @@ class ArgusMonitor:
         layout = Layout()
         layout.split_column(
             Layout(name="header", size=3),
-            Layout(name="body"),
-            Layout(name="footer", size=5 + min(len(self.games), MAX_GAMES)),
+            Layout(name="body", ratio=3),
+            Layout(name="footer", ratio=1),
         )
         layout["body"].split_row(
             Layout(name="events"),
