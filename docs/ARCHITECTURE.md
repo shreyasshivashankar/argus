@@ -82,7 +82,7 @@ cryptography
 - **`Order`** -- `ticker`, `action`, `side`, `count` (Kelly-computed), `type` (frozen "limit"), `yes_price`/`no_price`, `client_order_id` (auto UUID)
 - **`OrderState`** -- enum: `PLACED`, `RESTING`, `FILLED`, `PARTIALLY_FILLED`, `CANCELED` (executor state machine states)
 - **`ManagedOrder`** -- wraps `Order` + `OrderState` + `fill_count`, `remaining_count`, `kalshi_order_id`, `paired_exit_order_id` (optional) -- the executor's internal tracking model
-- **`AppSettings`** -- `pydantic-settings` BaseSettings: `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, `REDIS_URL`, `SPORTS_API_KEY`, `SPORTS_API_WS_URL`, `LLM_API_KEY`, `LLM_MODEL`, `TELEGRAM_CHAT_ID`, `DAILY_STOP_LOSS_USD`, `SLIPPAGE_TICKS`, `KELLY_FRACTION`, `TARGET_EXIT_SPREAD`, `CONTEXT_POLL_INTERVAL`, `BALANCE_POLL_INTERVAL`
+- **`AppSettings`** -- `pydantic-settings` BaseSettings: `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, `REDIS_URL`, `SPORTS_API_KEY`, `SPORTS_API_WS_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `TELEGRAM_CHAT_ID`, `DAILY_STOP_LOSS_USD`, `SLIPPAGE_TICKS`, `KELLY_FRACTION`, `TARGET_EXIT_SPREAD`, `CONTEXT_POLL_INTERVAL`, `BALANCE_POLL_INTERVAL`
 
 ### `core/bus.py` -- Redis Signal Bus + Context Cache
 

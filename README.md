@@ -40,7 +40,7 @@ LLM -- pick one, set the provider and its key:
 LLM_PROVIDER=anthropic          # "openai", "anthropic", or "gemini"
 ANTHROPIC_API_KEY=sk-ant-...    # Claude
 GEMINI_API_KEY=AIza...          # Gemini
-LLM_API_KEY=sk-...              # OpenAI
+OPENAI_API_KEY=sk-...           # OpenAI
 ```
 
 ### 3. Run

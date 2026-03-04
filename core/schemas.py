@@ -178,9 +178,9 @@ class AppSettings(BaseSettings):
     SPORTS_API_WS_URL: str = ""
 
     # LLM — provider selection: "openai", "anthropic", or "gemini"
-    LLM_PROVIDER: str = "openai"
-    LLM_API_KEY: str = ""
-    LLM_MODEL: str = "gpt-4o-mini"
+    LLM_PROVIDER: str = "gemini"
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-4o-mini"
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
     GEMINI_API_KEY: str = ""

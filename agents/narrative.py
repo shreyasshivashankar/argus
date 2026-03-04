@@ -217,7 +217,7 @@ class NarrativeAgent(BaseAgent):
                 api_key=settings.GEMINI_API_KEY,
                 model=settings.GEMINI_MODEL,
             )
-        return OpenAIProvider(api_key=settings.LLM_API_KEY, model=settings.LLM_MODEL)
+        return OpenAIProvider(api_key=settings.OPENAI_API_KEY, model=settings.OPENAI_MODEL)
 
     # ------------------------------------------------------------------
     # Main loop
