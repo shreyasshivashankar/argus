@@ -8,15 +8,15 @@ The fastest way to run. No Python, pip, or Redis install needed -- Docker handle
 
 ### 1. Get your Kalshi API key
 
-**Demo (fake money):** [demo.kalshi.com](https://demo.kalshi.com) -> Settings -> API Keys -> Create
+**Demo (fake money):** [demo.kalshi.co](https://demo.kalshi.co) -> Account Settings -> Profile Settings -> Create New API Key
 
-**Prod (real money):** [kalshi.com](https://kalshi.com) -> Settings -> API Keys -> Create
+**Prod (real money):** [kalshi.com](https://kalshi.com) -> Account Settings -> Profile Settings -> Create New API Key
 
-You'll get an API Key ID and a `.pem` private key file. Put the key somewhere safe on your server:
+You'll get an API Key ID and a `.key` private key file. Save the private key immediately -- you can't retrieve it later. Put it somewhere safe on your server:
 
 ```bash
-scp kalshi_private_key.pem shrey@kalshi-bot-instance-1:~/.ssh/kalshi_private_key.pem
-chmod 600 ~/.ssh/kalshi_private_key.pem
+scp kalshi_private_key.key shrey@kalshi-bot-instance-1:~/.ssh/kalshi_private_key.key
+chmod 600 ~/.ssh/kalshi_private_key.key
 ```
 
 ### 2. Configure `.env`
@@ -31,7 +31,7 @@ Required:
 
 ```
 KALSHI_API_KEY_ID=your-api-key-id
-KALSHI_PRIVATE_KEY_PATH=/home/shrey/.ssh/kalshi_private_key.pem
+KALSHI_PRIVATE_KEY_PATH=/home/shrey/.ssh/kalshi_private_key.key
 ```
 
 LLM -- pick one, set the provider and its key:
