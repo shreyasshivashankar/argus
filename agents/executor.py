@@ -468,6 +468,27 @@ class OrderExecutor(BaseAgent):
                     except Exception:
                         self.log.exception("Failed to cancel {}", managed.kalshi_order_id)
 
+    async def _cancel_resting_entries(self) -> int:
+        """Cancel only resting entry orders; exit orders stay alive on the exchange.
+
+        Returns the number of exit orders left resting.
+        """
+        exits_left = 0
+        for managed in self._orders.values():
+            if managed.state not in (OrderState.PLACED, OrderState.RESTING):
+                continue
+            if managed.is_exit:
+                exits_left += 1
+                continue
+            if managed.kalshi_order_id:
+                try:
+                    await self.client.cancel_order(managed.kalshi_order_id)
+                    managed.state = OrderState.CANCELED
+                    self.log.warning("Canceled resting entry: {}", managed.kalshi_order_id)
+                except Exception:
+                    self.log.exception("Failed to cancel {}", managed.kalshi_order_id)
+        return exits_left
+
     async def _send_telegram_alert(self) -> None:
         msg = (
             f"🚨 ARGUS KILL SWITCH TRIPPED\n"

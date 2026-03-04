@@ -115,14 +115,24 @@ class APISportsFeed(SportsFeed):
 
 
 # ---------------------------------------------------------------------------
-# Balldontlie REST feed (research / backtest only)
+# Balldontlie REST feed (paper trading / research)
 # ---------------------------------------------------------------------------
 
-class BalldontlieFeed(SportsFeed):
-    """REST polling feed from Balldontlie.
+_LIVE_STATUSES = frozenset({
+    "1st Qtr", "2nd Qtr", "3rd Qtr", "4th Qtr", "Halftime",
+    "OT", "1OT", "2OT", "3OT",
+})
 
-    WARNING: This is for backtesting and historical research ONLY.
-    Do NOT use for live trading — REST polling adds unacceptable latency.
+
+class BalldontlieFeed(SportsFeed):
+    """REST polling feed from Balldontlie (api.balldontlie.io).
+
+    Suitable for paper trading and research. Polls today's games and only
+    emits live in-progress games. Free tier allows 5 req/min so the default
+    poll interval is 15 seconds.
+
+    Do NOT use for live trading — REST polling adds unacceptable latency
+    compared to a WebSocket feed like Sportradar.
     """
 
     _BASE_URL = "https://api.balldontlie.io/v1"
@@ -131,28 +141,50 @@ class BalldontlieFeed(SportsFeed):
         self,
         settings: AppSettings,
         bus: SignalBus,
-        poll_interval: float = 15.0,
     ) -> None:
         super().__init__(settings, bus)
-        self._poll_interval = poll_interval
+        self._poll_interval = settings.SPORTS_POLL_INTERVAL
+        self._api_key = settings.BALLDONTLIE_API_KEY
         self._session: aiohttp.ClientSession | None = None
 
     async def connect(self) -> None:
-        self._session = aiohttp.ClientSession()
-        logger.warning(
-            "BalldontlieFeed is for RESEARCH ONLY — do not use for live trading"
+        self._session = aiohttp.ClientSession(
+            headers={"Authorization": self._api_key},
+        )
+        logger.info(
+            "BalldontlieFeed connected (poll every {}s) — paper/research only",
+            self._poll_interval,
         )
 
     async def listen(self) -> AsyncIterator[GameState]:
         assert self._session is not None
         while self._running:
             try:
-                async with self._session.get(f"{self._BASE_URL}/games?dates[]={datetime.utcnow().strftime('%Y-%m-%d')}") as resp:
+                today = datetime.utcnow().strftime("%Y-%m-%d")
+                url = f"{self._BASE_URL}/games?dates[]={today}&per_page=100"
+                async with self._session.get(url) as resp:
+                    if resp.status == 401:
+                        logger.error("Balldontlie 401 — check BALLDONTLIE_API_KEY")
+                        await asyncio.sleep(self._poll_interval)
+                        continue
+                    if resp.status == 429:
+                        logger.warning("Balldontlie rate limited, backing off")
+                        await asyncio.sleep(60)
+                        continue
+                    resp.raise_for_status()
                     data = await resp.json()
+                    live_count = 0
                     for game in data.get("data", []):
+                        if game.get("status") not in _LIVE_STATUSES:
+                            continue
                         gs = self._parse(game)
                         if gs:
+                            live_count += 1
                             yield gs
+                    if live_count:
+                        logger.debug("Balldontlie: {} live games", live_count)
+            except aiohttp.ClientError:
+                logger.exception("Balldontlie poll failed (network)")
             except Exception:
                 logger.exception("Balldontlie poll failed")
             await asyncio.sleep(self._poll_interval)
@@ -160,14 +192,18 @@ class BalldontlieFeed(SportsFeed):
     @staticmethod
     def _parse(game: dict) -> GameState | None:
         try:
+            status = game.get("status", "")
+            clock = game.get("time", "") or "0:00"
+            quarter = game.get("period", 0)
+
             return GameState(
                 game_id=str(game["id"]),
                 home_team=game["home_team"]["full_name"],
                 away_team=game["visitor_team"]["full_name"],
                 home_score=game.get("home_team_score", 0),
                 away_score=game.get("visitor_team_score", 0),
-                quarter=game.get("period", 0),
-                clock=game.get("time", "0:00") or "0:00",
+                quarter=quarter,
+                clock=clock if clock.strip() else status,
                 timestamp=datetime.utcnow(),
             )
         except (KeyError, TypeError):

@@ -27,7 +27,7 @@ from core.bus import SignalBus
 from core.client import KalshiAsyncClient
 from core.schemas import AppSettings
 from watchers.kalshi_feed import KalshiFeedWatcher
-from watchers.sports_feed import APISportsFeed
+from watchers.sports_feed import APISportsFeed, BalldontlieFeed
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,7 +75,12 @@ async def main(
     client = KalshiAsyncClient(settings)
 
     # --- Watchers ---
-    sports_feed = APISportsFeed(settings, bus)
+    if paper_mode:
+        sports_feed = BalldontlieFeed(settings, bus)
+        logger.info("Using BalldontlieFeed (REST polling, paper/research only)")
+    else:
+        sports_feed = APISportsFeed(settings, bus)
+        logger.info("Using APISportsFeed (WebSocket, production)")
     kalshi_feed = KalshiFeedWatcher(client, bus)
 
     # --- Agents ---
@@ -128,7 +133,12 @@ async def main(
 
     if not paper_mode and isinstance(executor, OrderExecutor):
         try:
-            await executor._cancel_all_resting()
+            exits_left = await executor._cancel_resting_entries()
+            if exits_left:
+                logger.info(
+                    "{} exit order(s) left resting on Kalshi — they can still fill",
+                    exits_left,
+                )
         except Exception:
             logger.exception("Error cancelling resting orders on shutdown")
 

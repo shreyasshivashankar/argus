@@ -176,6 +176,8 @@ class AppSettings(BaseSettings):
     # Sports data
     SPORTS_API_KEY: str = ""
     SPORTS_API_WS_URL: str = ""
+    BALLDONTLIE_API_KEY: str = ""
+    SPORTS_POLL_INTERVAL: float = 15.0
 
     # LLM — provider selection: "openai", "anthropic", or "gemini"
     LLM_PROVIDER: str = "gemini"

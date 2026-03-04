@@ -43,6 +43,14 @@ GEMINI_API_KEY=AIza...          # Gemini
 OPENAI_API_KEY=sk-...           # OpenAI
 ```
 
+Sports data -- paper mode uses Balldontlie (free REST polling). Get a key at [app.balldontlie.io](https://app.balldontlie.io/):
+
+```
+BALLDONTLIE_API_KEY=your-key-here
+```
+
+Live mode uses API-SPORTS WebSocket (paid, lower latency). Only needed when you go live.
+
 ### 3. Run
 
 ```bash
@@ -180,7 +188,7 @@ argus/
 │   └── base_agent.py          # Base class for all agents
 │
 ├── watchers/
-│   ├── sports_feed.py         # Live game scores via WebSocket
+│   ├── sports_feed.py         # Game scores (Balldontlie REST for paper, API-SPORTS WS for live)
 │   └── kalshi_feed.py         # Kalshi order book + fills via WebSocket
 │
 ├── agents/
