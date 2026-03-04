@@ -118,23 +118,39 @@ class PlayerPropStrategy(BaseStrategy):
     ) -> PlayerBoxScore | None:
         """Find the player referenced in the ticker from the box score.
 
-        Kalshi tickers embed a player's last name (sometimes hyphenated)
-        in the ticker segments. We check each player's last name against
-        the ticker for a substring match.
+        Kalshi tickers embed a player name — typically first initial +
+        last name (e.g. ``JWILLIAMS``) or just the last name. We first
+        try initial+last for an exact disambiguated match, then fall
+        back to longest last-name substring. If multiple players share
+        a last name and the ticker lacks an initial prefix, we return
+        None to avoid misattribution (the "Williams problem").
         """
         upper = ticker.upper()
-        best: PlayerBoxScore | None = None
+
+        candidates: list[PlayerBoxScore] = []
         best_len = 0
 
         for p in game.player_stats:
             last = p.last_name.upper().replace(" ", "")
             if len(last) < 3:
                 continue
-            if last in upper and len(last) > best_len:
-                best = p
-                best_len = len(last)
+            if last not in upper:
+                continue
 
-        return best
+            initial_last = p.first_name[0].upper() + last if p.first_name else last
+            if initial_last in upper:
+                return p
+
+            if len(last) > best_len:
+                candidates = [p]
+                best_len = len(last)
+            elif len(last) == best_len:
+                candidates.append(p)
+
+        if len(candidates) == 1:
+            return candidates[0]
+
+        return None
 
     # ------------------------------------------------------------------
     # Projection model

@@ -112,6 +112,37 @@ class TestPlayerMatching:
         player = strategy._match_player(market.ticker, game)
         assert player is None
 
+    def test_disambiguates_by_first_initial(self, strategy):
+        """Two players share a last name — ticker with initial resolves correctly."""
+        jalen = make_player_box_score(
+            player_id="300", first_name="Jalen", last_name="Williams",
+            team_abbr="OKC", minutes=30.0, pts=20, fga=14,
+        )
+        jaylin = make_player_box_score(
+            player_id="301", first_name="Jaylin", last_name="Williams",
+            team_abbr="OKC", minutes=18.0, pts=6, fga=5,
+        )
+        game = make_game_state(player_stats=[jalen, jaylin])
+        market = make_market_state(ticker="KXNBA-PLAYERPTS-04MAR26-OKC-JWILLIAMS-O18")
+        player = strategy._match_player(market.ticker, game)
+        assert player is not None
+        assert player.first_name == "Jalen"
+
+    def test_ambiguous_last_name_without_initial_returns_none(self, strategy):
+        """Two players share a last name and ticker has no initial — refuse to guess."""
+        jalen = make_player_box_score(
+            player_id="300", first_name="Jalen", last_name="Williams",
+            team_abbr="OKC", minutes=30.0, pts=20, fga=14,
+        )
+        jaylin = make_player_box_score(
+            player_id="301", first_name="Jaylin", last_name="Williams",
+            team_abbr="OKC", minutes=18.0, pts=6, fga=5,
+        )
+        game = make_game_state(player_stats=[jalen, jaylin])
+        market = make_market_state(ticker="KXNBA-PLAYERPTS-04MAR26-OKC-WILLIAMS-O18")
+        player = strategy._match_player(market.ticker, game)
+        assert player is None
+
 
 class TestProjection:
 
