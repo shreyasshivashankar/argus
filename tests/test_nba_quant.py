@@ -33,7 +33,7 @@ def _inject_state(quant: NBAQuantAgent, game_state=None, market_state=None):
 
 def _force_high_ev(quant: NBAQuantAgent):
     """Patch _model_probability to return a value that guarantees +EV."""
-    quant._model_probability = lambda g: 0.95  # type: ignore[assignment]
+    quant._model_probability = lambda g, t: 0.95  # type: ignore[assignment]
 
 
 # ===========================================================================
@@ -92,7 +92,7 @@ class TestEVThreshold:
         """Even with SAFE context, low EV should not publish."""
         _inject_state(quant)
         # Low model_prob → negative EV
-        quant._model_probability = lambda g: 0.10  # type: ignore[assignment]
+        quant._model_probability = lambda g, t: 0.10  # type: ignore[assignment]
         mock_bus.get_context.return_value = (ContextStatus.SAFE, "")
 
         await quant._evaluate_all()
@@ -211,7 +211,7 @@ class TestReallocation:
         """
         _inject_state(quant)
         mock_bus.get_context.return_value = (ContextStatus.SAFE, "")
-        quant._model_probability = lambda g: 0.18  # type: ignore[assignment]
+        quant._model_probability = lambda g, t: 0.18  # type: ignore[assignment]
 
         pos = make_portfolio_position(
             ticker="NBA-YES-OTHER",

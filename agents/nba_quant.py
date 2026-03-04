@@ -143,8 +143,9 @@ class NBAQuantAgent(BaseAgent):
         if market.yes_ask <= 0:
             return
 
+        target_team = market.ticker.split("-")[-1]
         implied_prob = market.yes_ask / 100.0
-        model_prob = self._model_probability(game)
+        model_prob = self._model_probability(game, target_team)
         payout = 1.0  # Kalshi binary: $1 payout
         entry_price_cents = market.yes_ask
         ev = model_prob * payout - (entry_price_cents / 100.0)
@@ -166,7 +167,7 @@ class NBAQuantAgent(BaseAgent):
         if last_signal and (now - last_signal).total_seconds() < 60:
             return
 
-        exit_price = entry_price_cents + self.settings.TARGET_EXIT_SPREAD
+        exit_price = min(entry_price_cents + self.settings.TARGET_EXIT_SPREAD, 99)
 
         if self._can_fund_trade(entry_price_cents):
             signal = Signal(
@@ -266,21 +267,22 @@ class NBAQuantAgent(BaseAgent):
     # Probability model
     # ------------------------------------------------------------------
 
-    def _model_probability(self, game: GameState) -> float:
-        """Compute win probability for the underdog from game state.
+    def _model_probability(self, game: GameState, target_team: str) -> float:
+        """Compute win probability for ``target_team`` from live game state.
 
-        Uses a pre-loaded reversal probability table keyed by
-        (quarter, score_differential).  Falls back to a simple logistic
-        estimate when the lookup misses.
+        The logistic core always estimates the *home* team's win probability.
+        If the ticker targets the away team, we return 1 - home_prob.
         """
         diff = game.away_score - game.home_score  # positive = away leading
         quarter = game.quarter
 
         cached = self._reversal_table.get((quarter, diff))
-        if cached is not None:
-            return cached
+        home_prob = cached if cached is not None else self._logistic_estimate(diff, quarter)
 
-        return self._logistic_estimate(diff, quarter)
+        home_ids = [game.home_abbr.upper(), game.home_team.upper()]
+        if target_team.upper() in home_ids:
+            return home_prob
+        return 1.0 - home_prob
 
     @staticmethod
     def _logistic_estimate(score_diff: int, quarter: int) -> float:
@@ -308,17 +310,19 @@ class NBAQuantAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _auto_map_tickers(self) -> None:
-        """Attempt to map live games to Kalshi NBA markets by team abbreviation."""
+        """Attempt to map live games to Kalshi NBA daily game markets."""
         for game_id, game in self._games.items():
             if game_id in self._game_to_ticker:
                 continue
+
             home = game.home_abbr.upper() if game.home_abbr else game.home_team.upper()
             away = game.away_abbr.upper() if game.away_abbr else game.away_team.upper()
+
             for ticker in self._markets:
                 ticker_upper = ticker.upper()
-                if not ticker_upper.startswith("KXNBA"):
+                if "GAME" not in ticker_upper:
                     continue
-                if home in ticker_upper or away in ticker_upper:
+                if home in ticker_upper and away in ticker_upper:
                     self.register_game_market(game_id, ticker)
                     break
 
