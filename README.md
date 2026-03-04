@@ -43,16 +43,28 @@ GEMINI_API_KEY=AIza...          # Gemini
 OPENAI_API_KEY=sk-...           # OpenAI
 ```
 
-Sports data -- Balldontlie. Get a key at [app.balldontlie.io](https://app.balldontlie.io/):
+Sports data -- pick a provider:
+
+```
+SPORTS_PROVIDER=sportradar       # "sportradar" (production) or "balldontlie" (paper)
+```
+
+**Sportradar (production)** -- Push Statistics streaming feed. Sub-second latency, full player box scores. Get an API key at [developer.sportradar.com](https://developer.sportradar.com/):
+
+```
+SPORTRADAR_API_KEY=your-key-here
+SPORTRADAR_ACCESS_LEVEL=production
+SPORTRADAR_SEASON=2025           # starting year of the NBA season
+```
+
+**Balldontlie (paper/research)** -- REST polling. Cheaper but higher latency. Get a key at [app.balldontlie.io](https://app.balldontlie.io/):
 
 ```
 BALLDONTLIE_API_KEY=your-key-here
-BALLDONTLIE_TIER=all-star        # "free" (scores only), "all-star" ($10/mo, +player stats), "goat" ($40/mo, prod-ready)
+BALLDONTLIE_TIER=all-star        # "free" (scores only), "all-star" ($10/mo, +player stats), "goat" ($40/mo)
 ```
 
-Player props require ALL-STAR tier or above for live box scores. The GOAT tier gives 600 req/min and a single `/box_scores/live` endpoint — best for production.
-
-For WebSocket-based production feeds, API-SPORTS is also supported (set `SPORTS_API_KEY` + `SPORTS_API_WS_URL`).
+Player props require at least ALL-STAR tier (or Sportradar) for live player stats.
 
 ### 3. Run
 
@@ -191,7 +203,7 @@ argus/
 │   └── base_agent.py          # Base class for all agents
 │
 ├── watchers/
-│   ├── sports_feed.py         # Game scores (Balldontlie REST for paper, API-SPORTS WS for live)
+│   ├── sports_feed.py         # Game scores + player stats (Sportradar streaming or Balldontlie REST)
 │   └── kalshi_feed.py         # Kalshi order book + fills via WebSocket
 │
 ├── agents/

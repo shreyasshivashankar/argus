@@ -122,12 +122,16 @@ Async `redis.asyncio` wrapper with two distinct roles:
 ### `watchers/sports_feed.py` -- Sports Data Watcher
 
 - **`SportsFeed`** -- ABC with `async connect()`, `async listen()` yielding `GameState`
-- **`APISportsFeed(SportsFeed)`** -- WebSocket to API-SPORTS, publishes `GameState` to `game:state`
-- **`BalldontlieFeed(SportsFeed)`** -- REST polling with tier-aware data fetching:
+- **`SportradarFeed(SportsFeed)`** -- Production feed using Sportradar NBA Push Statistics:
+  - **Daily Schedule** REST call at startup + every 6h to discover game IDs and teams
+  - **Push Statistics** HTTP chunked-transfer stream — server pushes real-time JSON payloads with full player box scores on every stat change, heartbeats every 5s
+  - **Game Summary** REST polling fallback (10s interval) if the stream disconnects
+  - Sub-second latency, full player-level stats (pts, fgm, fga, reb, ast, etc.)
+- **`BalldontlieFeed(SportsFeed)`** -- Paper/research feed with tier-aware data fetching:
   - **free** ($0/mo, 5 req/min): game scores only, no player stats
   - **all-star** ($9.99/mo, 60 req/min): adds per-player box scores via `/v1/stats?game_ids[]`
-  - **goat** ($39.99/mo, 600 req/min): single-call `/v1/box_scores/live` with embedded player stats — prod-ready latency
-- Pluggable: swap to Sportradar/LSports by adding a subclass
+  - **goat** ($39.99/mo, 600 req/min): single-call `/v1/box_scores/live` with embedded player stats
+- Provider selected via `SPORTS_PROVIDER` setting: `"sportradar"` (live) or `"balldontlie"` (paper)
 
 ### `watchers/kalshi_feed.py` -- Kalshi Order Book + Fill Watcher
 

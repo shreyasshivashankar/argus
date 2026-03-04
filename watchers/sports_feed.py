@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from typing import AsyncIterator
@@ -10,6 +11,19 @@ from loguru import logger
 
 from core.bus import SignalBus
 from core.schemas import AppSettings, GameState, PlayerBoxScore
+
+# NBA team alias -> standard 3-letter abbreviation
+_SR_ALIAS_MAP: dict[str, str] = {
+    "ATL": "ATL", "BOS": "BOS", "BKN": "BKN", "CHA": "CHA",
+    "CHI": "CHI", "CLE": "CLE", "DAL": "DAL", "DEN": "DEN",
+    "DET": "DET", "GS": "GSW", "GSW": "GSW", "HOU": "HOU",
+    "IND": "IND", "LAC": "LAC", "LAL": "LAL", "MEM": "MEM",
+    "MIA": "MIA", "MIL": "MIL", "MIN": "MIN", "NO": "NOP",
+    "NOP": "NOP", "NY": "NYK", "NYK": "NYK", "OKC": "OKC",
+    "ORL": "ORL", "PHI": "PHI", "PHO": "PHX", "PHX": "PHX",
+    "POR": "POR", "SAC": "SAC", "SA": "SAS", "SAS": "SAS",
+    "TOR": "TOR", "UTA": "UTA", "WAS": "WAS",
+}
 
 
 class SportsFeed(ABC):
@@ -42,74 +56,337 @@ class SportsFeed(ABC):
 
 
 # ---------------------------------------------------------------------------
-# API-SPORTS WebSocket feed (production tier)
+# Sportradar Push Statistics feed (production tier)
 # ---------------------------------------------------------------------------
 
-class APISportsFeed(SportsFeed):
-    """WebSocket-based feed from API-SPORTS (api-sports.io).
+_SR_BASE = "https://api.sportradar.com/nba"
 
-    Connects to the provider's WSS endpoint and pushes score changes
-    to the Redis bus as GameState objects. Replace the URL and message
-    parsing with the actual API-SPORTS WebSocket contract.
+
+class SportradarFeed(SportsFeed):
+    """Sportradar NBA Push Statistics streaming feed.
+
+    Uses two mechanisms:
+
+    1. **Daily Schedule** (REST, called once at startup and every 6 hours)
+       to discover today's game IDs, teams, and statuses.
+
+    2. **Push Statistics** (HTTP chunked-transfer streaming) which holds
+       a long-lived connection and pushes real-time JSON payloads with
+       full player-level box scores as they update. Heartbeats arrive
+       every ~5 seconds to keep the connection alive.
+
+    If the Push Statistics stream disconnects, the feed falls back to
+    polling the **Game Summary** REST endpoint every 10 seconds until
+    the stream reconnects.
+
+    This is the production-grade feed — sub-second latency on stat
+    updates, full player box scores, no polling.
     """
 
     def __init__(self, settings: AppSettings, bus: SignalBus) -> None:
         super().__init__(settings, bus)
-        self._ws_url = settings.SPORTS_API_WS_URL
-        self._api_key = settings.SPORTS_API_KEY
-        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self._api_key = settings.SPORTRADAR_API_KEY
+        self._access = settings.SPORTRADAR_ACCESS_LEVEL
+        self._season = settings.SPORTRADAR_SEASON
         self._session: aiohttp.ClientSession | None = None
 
+        self._game_meta: dict[str, dict] = {}
+        self._schedule_refresh_interval = 6 * 3600
+
     async def connect(self) -> None:
-        self._session = aiohttp.ClientSession()
-        headers = {"x-apisports-key": self._api_key}
-        self._ws = await self._session.ws_connect(self._ws_url, headers=headers)
-        logger.info("Connected to API-SPORTS WebSocket: {}", self._ws_url)
+        self._session = aiohttp.ClientSession(
+            headers={"x-api-key": self._api_key},
+            timeout=aiohttp.ClientTimeout(total=None, sock_read=30),
+        )
+        await self._load_daily_schedule()
+        logger.info(
+            "SportradarFeed connected ({} games today, access={})",
+            len(self._game_meta), self._access,
+        )
 
     async def listen(self) -> AsyncIterator[GameState]:
-        assert self._ws is not None
-        async for msg in self._ws:
+        assert self._session is not None
+
+        schedule_task = asyncio.create_task(self._schedule_refresh_loop())
+
+        while self._running:
+            try:
+                async for gs in self._stream_push_statistics():
+                    yield gs
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Push Statistics stream failed, falling back to REST polling")
+
             if not self._running:
                 break
-            if msg.type == aiohttp.WSMsgType.TEXT:
+
+            logger.info("Falling back to REST polling for Game Summary (10s interval)")
+            try:
+                async for gs in self._poll_game_summaries():
+                    yield gs
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("REST polling failed, retrying stream in 5s")
+                await asyncio.sleep(5)
+
+        schedule_task.cancel()
+
+    # ------------------------------------------------------------------
+    # Daily schedule
+    # ------------------------------------------------------------------
+
+    async def _load_daily_schedule(self) -> None:
+        assert self._session is not None
+        today = datetime.utcnow().strftime("%Y/%m/%d")
+        url = (
+            f"{_SR_BASE}/{self._access}/v8/en/"
+            f"games/{today}/schedule.json"
+        )
+        try:
+            async with self._session.get(url) as resp:
+                if resp.status != 200:
+                    logger.error("Sportradar schedule HTTP {}: {}", resp.status, await resp.text())
+                    return
+                data = await resp.json()
+
+            for game in data.get("games", []):
+                gid = game.get("id", "")
+                home = game.get("home", {})
+                away = game.get("away", {})
+                self._game_meta[gid] = {
+                    "home_team": home.get("name", ""),
+                    "home_market": home.get("market", ""),
+                    "home_alias": home.get("alias", ""),
+                    "away_team": away.get("name", ""),
+                    "away_market": away.get("market", ""),
+                    "away_alias": away.get("alias", ""),
+                    "status": game.get("status", ""),
+                }
+            logger.info("Loaded {} games from daily schedule", len(self._game_meta))
+        except Exception:
+            logger.exception("Failed to load daily schedule")
+
+    async def _schedule_refresh_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(self._schedule_refresh_interval)
+            await self._load_daily_schedule()
+
+    # ------------------------------------------------------------------
+    # Push Statistics stream
+    # ------------------------------------------------------------------
+
+    async def _stream_push_statistics(self) -> AsyncIterator[GameState]:
+        """Connect to Push Statistics and yield GameState on every update."""
+        assert self._session is not None
+        url = (
+            f"{_SR_BASE}/{self._access}/stream/en/"
+            f"statistics/subscribe"
+        )
+        logger.info("Opening Push Statistics stream: {}", url)
+
+        async with self._session.get(url) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                raise RuntimeError(f"Push Statistics HTTP {resp.status}: {body[:500]}")
+
+            logger.info("Push Statistics stream connected")
+            buffer = b""
+            async for chunk in resp.content.iter_any():
+                if not self._running:
+                    break
+                buffer += chunk
+
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if payload.get("heartbeat"):
+                        continue
+
+                    gs = self._parse_push_payload(payload)
+                    if gs:
+                        yield gs
+
+    # ------------------------------------------------------------------
+    # REST fallback: Game Summary polling
+    # ------------------------------------------------------------------
+
+    async def _poll_game_summaries(self) -> AsyncIterator[GameState]:
+        """Poll Game Summary for each in-progress game every 10s."""
+        assert self._session is not None
+        while self._running:
+            for gid, meta in list(self._game_meta.items()):
+                if meta.get("status") not in ("inprogress", "halftime"):
+                    continue
+                url = (
+                    f"{_SR_BASE}/{self._access}/v8/en/"
+                    f"games/{gid}/summary.json"
+                )
                 try:
-                    game_state = self._parse(msg.json())
-                    if game_state:
-                        yield game_state
+                    async with self._session.get(url) as resp:
+                        if resp.status == 429:
+                            logger.warning("Sportradar rate limited, backing off")
+                            await asyncio.sleep(30)
+                            continue
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+                        gs = self._parse_game_summary(gid, data)
+                        if gs:
+                            yield gs
                 except Exception:
-                    logger.exception("Failed to parse API-SPORTS message")
-            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                logger.warning("API-SPORTS WS closed/errored, reconnecting…")
-                await self._reconnect()
+                    logger.exception("Failed to poll game summary for {}", gid)
 
-    async def _reconnect(self) -> None:
-        await asyncio.sleep(2)
-        await self.connect()
+            await asyncio.sleep(10)
+            await self._load_daily_schedule()
 
-    @staticmethod
-    def _parse(data: dict) -> GameState | None:
-        """Parse a raw API-SPORTS WS message into a GameState.
+    # ------------------------------------------------------------------
+    # Parsers
+    # ------------------------------------------------------------------
 
-        This is a template; adapt field names to the actual API-SPORTS
-        WebSocket payload schema once the subscription is active.
+    def _parse_push_payload(self, payload: dict) -> GameState | None:
+        """Parse a Push Statistics JSON payload into a GameState.
+
+        The push payload wraps a game object with home/away teams,
+        each containing a ``players`` array with full statistics.
         """
         try:
+            game = payload.get("game", payload)
+            gid = game.get("id", "")
+
+            home = game.get("home", {})
+            away = game.get("away", {})
+
+            home_alias = home.get("alias", "")
+            away_alias = away.get("alias", "")
+            home_abbr = _SR_ALIAS_MAP.get(home_alias, home_alias)
+            away_abbr = _SR_ALIAS_MAP.get(away_alias, away_alias)
+
+            scoring = game.get("scoring", [])
+            quarter = len(scoring) if scoring else 0
+
+            clock = game.get("clock", "0:00") or "0:00"
+
+            players: list[PlayerBoxScore] = []
+            for team_key, abbr in [("home", home_abbr), ("away", away_abbr)]:
+                team_data = game.get(team_key, {})
+                for p in team_data.get("players", []):
+                    pbs = self._parse_sr_player(p, abbr)
+                    if pbs:
+                        players.append(pbs)
+
             return GameState(
-                game_id=str(data["id"]),
-                home_team=data["teams"]["home"]["name"],
-                away_team=data["teams"]["away"]["name"],
-                home_score=data["scores"]["home"]["total"],
-                away_score=data["scores"]["away"]["total"],
-                quarter=data.get("periods", {}).get("current", 0),
-                clock=data.get("status", {}).get("clock", "0:00"),
+                game_id=gid,
+                home_team=f"{home.get('market', '')} {home.get('name', '')}".strip(),
+                away_team=f"{away.get('market', '')} {away.get('name', '')}".strip(),
+                home_abbr=home_abbr,
+                away_abbr=away_abbr,
+                home_score=home.get("points", 0) or 0,
+                away_score=away.get("points", 0) or 0,
+                quarter=quarter,
+                clock=clock,
                 timestamp=datetime.utcnow(),
+                player_stats=players,
+            )
+        except (KeyError, TypeError):
+            logger.debug("Failed to parse push payload")
+            return None
+
+    def _parse_game_summary(self, gid: str, data: dict) -> GameState | None:
+        """Parse a Game Summary REST response into a GameState."""
+        try:
+            home = data.get("home", {})
+            away = data.get("away", {})
+
+            home_alias = home.get("alias", "")
+            away_alias = away.get("alias", "")
+            home_abbr = _SR_ALIAS_MAP.get(home_alias, home_alias)
+            away_abbr = _SR_ALIAS_MAP.get(away_alias, away_alias)
+
+            scoring = home.get("scoring", [])
+            quarter = len(scoring) if scoring else 0
+            clock = data.get("clock", "0:00") or "0:00"
+
+            players: list[PlayerBoxScore] = []
+            for team_data, abbr in [(home, home_abbr), (away, away_abbr)]:
+                for p in team_data.get("players", []):
+                    pbs = self._parse_sr_player(p, abbr)
+                    if pbs:
+                        players.append(pbs)
+
+            if gid in self._game_meta:
+                self._game_meta[gid]["status"] = data.get("status", "")
+
+            return GameState(
+                game_id=gid,
+                home_team=f"{home.get('market', '')} {home.get('name', '')}".strip(),
+                away_team=f"{away.get('market', '')} {away.get('name', '')}".strip(),
+                home_abbr=home_abbr,
+                away_abbr=away_abbr,
+                home_score=home.get("points", 0) or 0,
+                away_score=away.get("points", 0) or 0,
+                quarter=quarter,
+                clock=clock,
+                timestamp=datetime.utcnow(),
+                player_stats=players,
+            )
+        except (KeyError, TypeError):
+            logger.debug("Failed to parse game summary for {}", gid)
+            return None
+
+    @staticmethod
+    def _parse_sr_player(p: dict, team_abbr: str) -> PlayerBoxScore | None:
+        """Parse a Sportradar player object into a PlayerBoxScore."""
+        try:
+            stats = p.get("statistics", {})
+            full_name = p.get("full_name", "")
+            parts = full_name.rsplit(" ", 1)
+            first = parts[0] if len(parts) > 1 else full_name
+            last = parts[-1] if len(parts) > 1 else ""
+
+            min_str = stats.get("minutes", "0") or "0"
+            try:
+                if ":" in min_str:
+                    m, s = min_str.split(":", 1)
+                    minutes = int(m) + int(s) / 60.0
+                else:
+                    minutes = float(min_str)
+            except (ValueError, TypeError):
+                minutes = 0.0
+
+            return PlayerBoxScore(
+                player_id=p.get("id", p.get("sr_id", "")),
+                first_name=first,
+                last_name=last,
+                team_abbr=team_abbr,
+                minutes=minutes,
+                pts=stats.get("points", 0) or 0,
+                fgm=stats.get("field_goals_made", 0) or 0,
+                fga=stats.get("field_goals_att", 0) or 0,
+                fg3m=stats.get("three_points_made", 0) or 0,
+                fg3a=stats.get("three_points_att", 0) or 0,
+                ftm=stats.get("free_throws_made", 0) or 0,
+                fta=stats.get("free_throws_att", 0) or 0,
+                reb=stats.get("rebounds", 0) or 0,
+                ast=stats.get("assists", 0) or 0,
+                stl=stats.get("steals", 0) or 0,
+                blk=stats.get("blocks", 0) or 0,
+                turnover=stats.get("turnovers", 0) or 0,
+                pf=stats.get("personal_fouls", 0) or 0,
+                plus_minus=stats.get("pls_min", 0) or 0,
             )
         except (KeyError, TypeError):
             return None
 
     async def close(self) -> None:
-        if self._ws:
-            await self._ws.close()
         if self._session:
             await self._session.close()
 

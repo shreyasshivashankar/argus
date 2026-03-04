@@ -202,11 +202,21 @@ class AppSettings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379"
 
-    # Sports data
-    SPORTS_API_KEY: str = ""
-    SPORTS_API_WS_URL: str = ""
+    # Sports data — provider selection: "sportradar" or "balldontlie"
+    SPORTS_PROVIDER: str = "balldontlie"
+
+    # Sportradar (production)
+    SPORTRADAR_API_KEY: str = ""
+    SPORTRADAR_ACCESS_LEVEL: str = "production"  # "trial" or "production"
+    SPORTRADAR_SEASON: str = "2025"  # starting year of season (2025 = 2025-26)
+
+    # Balldontlie (paper/research)
     BALLDONTLIE_API_KEY: str = ""
     BALLDONTLIE_TIER: str = "all-star"  # "free", "all-star", or "goat"
+
+    # Legacy — kept for backwards compat, unused if SPORTS_PROVIDER is set
+    SPORTS_API_KEY: str = ""
+    SPORTS_API_WS_URL: str = ""
     SPORTS_POLL_INTERVAL: float = 15.0
 
     # LLM — provider selection: "openai", "anthropic", or "gemini"
