@@ -213,8 +213,6 @@ class ArgusMonitor:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        console.clear()
-
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._stop)
@@ -225,13 +223,15 @@ class ArgusMonitor:
 
         try:
             with Live(
+                self._build_dashboard(),
                 refresh_per_second=2,
-                screen=True,
                 console=console,
+                screen=False,
+                transient=True,
             ) as live:
                 while self._running:
-                    live.update(self._build_dashboard())
                     await asyncio.sleep(0.5)
+                    live.update(self._build_dashboard())
         finally:
             sub_task.cancel()
             await self.bus.close()
