@@ -220,22 +220,14 @@ argus/
 └── logs/
 ```
 
-## Adding New Sports
+## Adding New Markets
 
-1. Write a new quant agent -- subclass `BaseAgent` (e.g. `agents/nfl_quant.py`)
-2. Add a sports feed if the data source is different
-3. Wire it up in `main.py`
+To trade a new market type (e.g. spreads, player props), add a strategy file to `agents/strategies/`. Implement `can_evaluate` (does this ticker belong to me?) and `evaluate` (is there an edge?). The OmniQuant agent picks it up automatically.
 
-The core stuff (Redis bus, Kalshi client, executor) doesn't care about the sport.
+To add a new sport entirely, write a new quant agent (subclass `BaseAgent`), add a sports feed if the data source is different, and wire it in `main.py`. The executor, Redis bus, and Kalshi client don't care what sport the signal came from.
 
-## Key Invariants
+## How It Stays Safe
 
-- Missing context = VETO. The bot never trades blind.
-- No REST calls in the hot path. Bankroll is background-cached.
-- LLM runs out-of-band. Context is pre-computed, not inline.
-- Limit orders only. No market order codepath.
-- Exit orders wait for fill confirmation before dispatching.
-- Partial fills get hedged immediately.
-- Kill switch uses VWAP, not limit prices.
-- Reallocation only happens when the new trade's projected EV strictly beats the foregone profit plus fees.
-- Reallocation targets orders by ID, not by ticker, so partial-fill batches don't get mixed up.
+The bot is designed to fail conservatively. If the LLM goes down, context keys expire and trading stops. If bankroll data is stale by a few dollars, that's fine -- missing a trade by 200ms is worse. Limit orders only, no market orders anywhere. Exit orders only fire after Kalshi confirms the entry filled. Partial fills get their own exit immediately instead of waiting for the full order.
+
+The kill switch tracks P&L using actual execution prices (VWAP), not limit prices, so it stays accurate across hundreds of trades. Reallocation math is unit-correct and targets specific orders by ID, not by ticker, so partial-fill batches don't get mixed up.

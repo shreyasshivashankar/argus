@@ -39,9 +39,9 @@ flowchart LR
   WaitFill -->|"fill event"| PlaceSell
 ```
 
-The Narrative Agent runs entirely out-of-band. It never sits in the trade execution path. Instead, it continuously monitors news/play-by-play and maintains a Redis context cache. The Quant Engine reads this cache synchronously (microsecond `redis.get`) when it detects a +EV anomaly -- no LLM latency in the hot path.
+The Narrative Agent runs in the background, not in the trade path. It polls the LLM, writes SAFE/VETO to Redis, and the quant agent reads that key when it finds a +EV anomaly. No LLM call blocks a trade.
 
-The Executor never sells contracts it doesn't own. It subscribes to Kalshi's WebSocket `fill` channel and only dispatches the paired exit sell after receiving a fill confirmation with `post_position > 0`.
+The Executor won't sell contracts it doesn't own. It waits for a Kalshi fill event before placing the exit order.
 
 ## Kalshi WebSocket Channels
 
@@ -74,15 +74,15 @@ cryptography
 
 ### `core/schemas.py` -- Pydantic Models
 
-- **`SignalStatus`** -- enum: `PENDING_BUY`, `VALIDATED`, `VETOED`, `EXECUTED`
-- **`ContextStatus`** -- enum: `SAFE`, `VETO` (what gets written to the Redis context cache)
-- **`Signal`** -- `ticker`, `action`, `side`, `status: SignalStatus`, `confidence` (0.0-1.0), `source`, `ev_estimate`, `entry_price`, `exit_price`, `veto_reason` (optional), `game_id`, `timestamp`
-- **`GameState`** -- `game_id`, `home_team`, `away_team`, `home_score`, `away_score`, `quarter`, `clock`, `timestamp`
+- **`SignalStatus`** -- `PENDING_BUY`, `VALIDATED`, `VETOED`, `EXECUTED`, `REALLOCATE`
+- **`ContextStatus`** -- `SAFE`, `VETO`
+- **`Signal`** -- the object that flows through the bus. Has `ticker`, `action`, `side`, `status`, `confidence`, `source` (which strategy produced it), `ev_estimate`, `entry_price`, `exit_price`, `game_id`, `target_order_id` (for reallocation), `timestamp`
+- **`GameState`** -- `game_id`, `home_team`, `away_team`, `home_abbr`, `away_abbr`, `home_score`, `away_score`, `quarter`, `clock`, `timestamp`
 - **`MarketState`** -- `ticker`, `yes_bid`, `yes_ask`, `no_bid`, `no_ask`, `volume`, `timestamp`
-- **`Order`** -- `ticker`, `action`, `side`, `count` (Kelly-computed), `type` (frozen "limit"), `yes_price`/`no_price`, `client_order_id` (auto UUID)
-- **`OrderState`** -- enum: `PLACED`, `RESTING`, `FILLED`, `PARTIALLY_FILLED`, `CANCELED` (executor state machine states)
-- **`ManagedOrder`** -- wraps `Order` + `OrderState` + `fill_count`, `remaining_count`, `kalshi_order_id`, `paired_exit_order_id` (optional) -- the executor's internal tracking model
-- **`AppSettings`** -- `pydantic-settings` BaseSettings: `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, `REDIS_URL`, `SPORTS_API_KEY`, `SPORTS_API_WS_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `TELEGRAM_CHAT_ID`, `DAILY_STOP_LOSS_USD`, `SLIPPAGE_TICKS`, `KELLY_FRACTION`, `TARGET_EXIT_SPREAD`, `CONTEXT_POLL_INTERVAL`, `BALANCE_POLL_INTERVAL`
+- **`Order`** -- `ticker`, `action`, `side`, `count`, `type` (frozen to "limit"), `yes_price`/`no_price`, `client_order_id`
+- **`ManagedOrder`** -- wraps `Order` with execution state: `state`, `fill_count`, `remaining_count`, `vwap_cents`, `is_exit`, `parent_entry_id`, `paired_exit_order_ids`, `created_at`
+- **`PortfolioPosition`** / **`PortfolioState`** -- published by the executor so the quant agent knows what's resting and how much bankroll is left
+- **`AppSettings`** -- everything from `.env`: Kalshi keys, Redis URL, LLM config, kill switch, Kelly fraction, reallocation thresholds, poll intervals
 
 ### `core/bus.py` -- Redis Signal Bus + Context Cache
 
@@ -90,11 +90,13 @@ Async `redis.asyncio` wrapper with two distinct roles:
 
 **Pub/Sub channels** (event-driven):
 
-- `game:state` -- live game state from sports watcher
-- `market:state` -- live order book from Kalshi watcher
-- `signal:validated` -- signals that passed context check (Quant publishes directly)
-- `signal:executed` -- execution confirmations
-- `signal:heartbeat` -- agent health
+- `game:state` -- live game state from the sports watcher
+- `market:state` -- live order book from the Kalshi watcher
+- `signal:validated` -- quant agent fires these when a strategy finds +EV and context is SAFE
+- `signal:executed` -- executor publishes after a fill completes
+- `signal:reallocate` -- quant agent asks the executor to liquidate a position for a better opportunity
+- `signal:heartbeat` -- each agent pings this so the monitor knows they're alive
+- `portfolio:state` -- executor broadcasts bankroll + resting exits so the quant agent can check capital
 
 **Key-value context cache** (synchronous reads):
 
@@ -156,15 +158,11 @@ Multi-strategy portfolio manager. Subscribes to `game:state`, `market:state`, an
 
 **Adding a new strategy:** Create a new file in `agents/strategies/`, implement `BaseStrategy`, and add it to the `strategies` list in the `NBAQuantAgent` constructor. No changes to the agent itself.
 
-### `agents/narrative.py` -- Out-of-Band Context Monitor
+### `agents/narrative.py` -- Context Monitor
 
-Runs independently in a background loop, never in the trade execution path:
+Background loop that asks the LLM whether anything bad is happening in each active game (injuries, ejections, etc.). Writes SAFE or VETO to a Redis key with a 5-minute TTL. If it crashes or the LLM goes down, the keys expire and the quant agent treats missing context as VETO.
 
-1. Monitors active games (reads `game:state` for game IDs)
-2. Every N seconds (`CONTEXT_POLL_INTERVAL`), queries LLM: *"Is there critical negative context (injuries, ejections, technical fouls) for {team} in the last 3 minutes?"*
-3. Writes result to Redis: `redis.set("game:context:{game_id}", "SAFE", ex=300)` or `redis.set("game:context:{game_id}", "VETO:Curry limped off at 4:32 Q3", ex=300)`
-4. On critical events (star player injury), immediately writes `VETO` without waiting for poll interval
-5. Built behind `LLMProvider` interface (pluggable: OpenAI / Anthropic / Gemini)
+Swappable LLM backend -- `LLMProvider` interface with OpenAI, Anthropic, and Gemini implementations. Set `LLM_PROVIDER` in `.env` to switch.
 
 ### `agents/executor.py` -- Fill-Aware Execution State Machine
 
@@ -214,16 +212,16 @@ Key behaviors:
   - `OrderExecutor`
 - Graceful shutdown on SIGINT/SIGTERM: cancel resting orders, flush logs
 
-## Key Design Decisions
+## Design Decisions
 
-- **Zero REST in hot path** -- bankroll is background-cached; context is a Redis key read; no HTTP calls between +EV detection and order placement
-- **Fail-close on missing context** -- `None` from Redis = `VETO`; the system never trades without a confirmed `SAFE` from the Narrative Agent
-- **Single Kalshi WS connection** -- multiplexes `orderbook_delta`, `ticker`, `fill`, `user_orders` on one auth'd socket
-- **Limit orders only** -- `Order.type` frozen to `"limit"`, no market order codepath exists
-- **Context cache with TTL** -- stale context auto-expires (5min default); expiration triggers fail-close
-- **Half-Kelly default** -- conservative position sizing to survive variance
-- **Pluggable interfaces** -- `SportsFeed` and `LLMProvider` are ABCs, swap providers by subclassing
-- **Balldontlie is research-only** -- never used for live trading, only historical backtest data
+- No HTTP calls in the trade path. Bankroll is cached, context is a Redis key. The only thing between "+EV detected" and "order placed" is a Redis read and some arithmetic.
+- Missing context = VETO. If the LLM is down or the key expired, the bot stops trading. It doesn't guess.
+- One Kalshi WebSocket connection handles everything: order book, fills, order status.
+- Limit orders only. There's no market order codepath anywhere in the system.
+- Context keys have a 5-minute TTL. If the Narrative Agent dies, keys expire and the bot stops on its own.
+- Half-Kelly by default. Conservative sizing so a bad night doesn't wipe you out.
+- `SportsFeed` and `LLMProvider` are interfaces. Swap Balldontlie for Sportradar, or Gemini for Claude, by writing a subclass.
+- Strategies are pluggable too. Drop a new file in `agents/strategies/`, implement `BaseStrategy`, add it to the constructor list.
 
 ## Capital Rebalancing (Opportunity Cost Engine)
 
