@@ -43,13 +43,16 @@ GEMINI_API_KEY=AIza...          # Gemini
 OPENAI_API_KEY=sk-...           # OpenAI
 ```
 
-Sports data -- paper mode uses Balldontlie (free REST polling). Get a key at [app.balldontlie.io](https://app.balldontlie.io/):
+Sports data -- Balldontlie. Get a key at [app.balldontlie.io](https://app.balldontlie.io/):
 
 ```
 BALLDONTLIE_API_KEY=your-key-here
+BALLDONTLIE_TIER=all-star        # "free" (scores only), "all-star" ($10/mo, +player stats), "goat" ($40/mo, prod-ready)
 ```
 
-Live mode uses API-SPORTS WebSocket (paid, lower latency). Only needed when you go live.
+Player props require ALL-STAR tier or above for live box scores. The GOAT tier gives 600 req/min and a single `/box_scores/live` endpoint — best for production.
+
+For WebSocket-based production feeds, API-SPORTS is also supported (set `SPORTS_API_KEY` + `SPORTS_API_WS_URL`).
 
 ### 3. Run
 
@@ -196,7 +199,8 @@ argus/
 │   ├── strategies/
 │   │   ├── base.py            # BaseStrategy interface
 │   │   ├── moneyline.py       # Logistic reversal model (game-winner markets)
-│   │   └── totals.py          # Pace projection model (over/under markets)
+│   │   ├── totals.py          # Pace projection model (over/under markets)
+│   │   └── player_props.py    # Usage-rate projection (player points markets)
 │   ├── narrative.py           # LLM context monitor (injury reports, momentum)
 │   ├── executor.py            # Order lifecycle, Kelly sizing, kill switch
 │   ├── paper_executor.py      # Simulated matching engine for paper mode
@@ -210,6 +214,7 @@ argus/
 │   ├── test_kalshi_feed.py
 │   ├── test_executor.py
 │   ├── test_nba_quant.py
+│   ├── test_player_props.py
 │   └── test_client.py
 │
 ├── docs/
@@ -222,7 +227,9 @@ argus/
 
 ## Adding New Markets
 
-To trade a new market type (e.g. spreads, player props), add a strategy file to `agents/strategies/`. Implement `can_evaluate` (does this ticker belong to me?) and `evaluate` (is there an edge?). The OmniQuant agent picks it up automatically.
+To trade a new market type (e.g. spreads), add a strategy file to `agents/strategies/`. Implement `can_evaluate` (does this ticker belong to me?) and `evaluate` (is there an edge?). The OmniQuant agent picks it up automatically.
+
+Current strategies: **moneyline** (game winner), **totals** (over/under), **player_props** (individual player points).
 
 To add a new sport entirely, write a new quant agent (subclass `BaseAgent`), add a sports feed if the data source is different, and wire it in `main.py`. The executor, Redis bus, and Kalshi client don't care what sport the signal came from.
 

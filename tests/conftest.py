@@ -17,6 +17,7 @@ from core.schemas import (
     MarketState,
     Order,
     OrderState,
+    PlayerBoxScore,
     PortfolioPosition,
     PortfolioState,
     Side,
@@ -158,22 +159,61 @@ def make_managed_order(
     return ManagedOrder(**kwargs)
 
 
+def make_player_box_score(
+    *,
+    player_id: str = "12345",
+    first_name: str = "LeBron",
+    last_name: str = "James",
+    team_abbr: str = "LAL",
+    minutes: float = 28.0,
+    pts: int = 22,
+    fgm: int = 8,
+    fga: int = 16,
+    fg3m: int = 3,
+    fg3a: int = 6,
+    ftm: int = 3,
+    fta: int = 4,
+    reb: int = 7,
+    ast: int = 5,
+) -> PlayerBoxScore:
+    return PlayerBoxScore(
+        player_id=player_id,
+        first_name=first_name,
+        last_name=last_name,
+        team_abbr=team_abbr,
+        minutes=minutes,
+        pts=pts,
+        fgm=fgm,
+        fga=fga,
+        fg3m=fg3m,
+        fg3a=fg3a,
+        ftm=ftm,
+        fta=fta,
+        reb=reb,
+        ast=ast,
+    )
+
+
 def make_game_state(
     *,
     game_id: str = "game-001",
     home_score: int = 80,
     away_score: int = 85,
     quarter: int = 3,
+    player_stats: list[PlayerBoxScore] | None = None,
 ) -> GameState:
     return GameState(
         game_id=game_id,
         home_team="LAL",
         away_team="DEN",
+        home_abbr="LAL",
+        away_abbr="DEN",
         home_score=home_score,
         away_score=away_score,
         quarter=quarter,
         clock="5:30",
         timestamp=datetime.utcnow(),
+        player_stats=player_stats or [],
     )
 
 

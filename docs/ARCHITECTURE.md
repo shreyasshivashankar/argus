@@ -77,7 +77,8 @@ cryptography
 - **`SignalStatus`** -- `PENDING_BUY`, `VALIDATED`, `VETOED`, `EXECUTED`, `REALLOCATE`
 - **`ContextStatus`** -- `SAFE`, `VETO`
 - **`Signal`** -- the object that flows through the bus. Has `ticker`, `action`, `side`, `status`, `confidence`, `source` (which strategy produced it), `ev_estimate`, `entry_price`, `exit_price`, `game_id`, `target_order_id` (for reallocation), `timestamp`
-- **`GameState`** -- `game_id`, `home_team`, `away_team`, `home_abbr`, `away_abbr`, `home_score`, `away_score`, `quarter`, `clock`, `timestamp`
+- **`PlayerBoxScore`** -- per-player live box score: `player_id`, `first_name`, `last_name`, `team_abbr`, `minutes`, `pts`, `fgm`, `fga`, `fg3m`, `fg3a`, `ftm`, `fta`, `reb`, `ast`, `stl`, `blk`, `turnover`, `pf`, `plus_minus`
+- **`GameState`** -- `game_id`, `home_team`, `away_team`, `home_abbr`, `away_abbr`, `home_score`, `away_score`, `quarter`, `clock`, `timestamp`, `player_stats: list[PlayerBoxScore]`
 - **`MarketState`** -- `ticker`, `yes_bid`, `yes_ask`, `no_bid`, `no_ask`, `volume`, `timestamp`
 - **`Order`** -- `ticker`, `action`, `side`, `count`, `type` (frozen to "limit"), `yes_price`/`no_price`, `client_order_id`
 - **`ManagedOrder`** -- wraps `Order` with execution state: `state`, `fill_count`, `remaining_count`, `vwap_cents`, `is_exit`, `parent_entry_id`, `paired_exit_order_ids`, `created_at`
@@ -122,7 +123,10 @@ Async `redis.asyncio` wrapper with two distinct roles:
 
 - **`SportsFeed`** -- ABC with `async connect()`, `async listen()` yielding `GameState`
 - **`APISportsFeed(SportsFeed)`** -- WebSocket to API-SPORTS, publishes `GameState` to `game:state`
-- **`BalldontlieFeed(SportsFeed)`** -- REST polling, research/backtest only, marked non-production
+- **`BalldontlieFeed(SportsFeed)`** -- REST polling with tier-aware data fetching:
+  - **free** ($0/mo, 5 req/min): game scores only, no player stats
+  - **all-star** ($9.99/mo, 60 req/min): adds per-player box scores via `/v1/stats?game_ids[]`
+  - **goat** ($39.99/mo, 600 req/min): single-call `/v1/box_scores/live` with embedded player stats — prod-ready latency
 - Pluggable: swap to Sportradar/LSports by adding a subclass
 
 ### `watchers/kalshi_feed.py` -- Kalshi Order Book + Fill Watcher
@@ -144,10 +148,11 @@ Multi-strategy portfolio manager. Subscribes to `game:state`, `market:state`, an
 - `agents/strategies/base.py` -- `BaseStrategy` ABC with `can_evaluate(market)` and `evaluate(game, market) -> Signal | None`
 - `agents/strategies/moneyline.py` -- Logistic reversal model for game-winner (GAME) tickers. Directional: resolves which team the ticker targets.
 - `agents/strategies/totals.py` -- Pace projection model for over/under (TOTAL) tickers. Projects final score from current pace, compares to Kalshi line.
+- `agents/strategies/player_props.py` -- Usage-rate projection for player points (PLAYERPTS/PTS) tickers. Calculates FGA share of team total, projects final points from live pace, and compares to the Kalshi prop line. Requires `player_stats` in `GameState` (ALL-STAR+ tier).
 
 **Evaluation flow (no external async I/O in the hot path):**
 
-1. On each game/market update, auto-map games to all matching KXNBA tickers (multiple per game: moneyline, totals, spreads)
+1. On each game/market update, auto-map games to all matching KXNBA tickers (multiple per game: moneyline, totals, spreads, player props)
 2. For each game, fan out to all registered strategies across all mapped markets
 3. Collect proposals, rank by EV (highest first)
 4. Take the best proposal and run it through the context + cooldown + capital pipeline:

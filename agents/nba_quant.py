@@ -17,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from agents.strategies import MoneylineStrategy, TotalsStrategy
+from agents.strategies import MoneylineStrategy, PlayerPropStrategy, TotalsStrategy
 from agents.strategies.base import BaseStrategy
 from core.base_agent import BaseAgent
 from core.bus import SignalBus
@@ -58,6 +58,10 @@ class NBAQuantAgent(BaseAgent):
                 target_exit_spread=settings.TARGET_EXIT_SPREAD,
             ),
             TotalsStrategy(
+                ev_threshold=settings.EV_THRESHOLD / 100.0,
+                target_exit_spread=settings.TARGET_EXIT_SPREAD,
+            ),
+            PlayerPropStrategy(
                 ev_threshold=settings.EV_THRESHOLD / 100.0,
                 target_exit_spread=settings.TARGET_EXIT_SPREAD,
             ),
@@ -279,9 +283,10 @@ class NBAQuantAgent(BaseAgent):
     def _auto_map_tickers(self) -> None:
         """Map live games to all matching Kalshi NBA market tickers.
 
-        A game can map to multiple tickers (moneyline, totals, spreads).
-        Each ticker must contain both team abbreviations to confirm
-        it belongs to this specific matchup.
+        A game can map to multiple tickers (moneyline, totals, spreads,
+        player props). Team-level markets require both team abbreviations.
+        Player prop tickers (containing ``PLAYERPTS`` / ``PTS``) only
+        need a single team abbreviation since they reference an individual.
         """
         for game_id, game in self._games.items():
             if game_id in self._game_to_tickers:
@@ -295,8 +300,18 @@ class NBAQuantAgent(BaseAgent):
                 ticker_upper = ticker.upper()
                 if not ticker_upper.startswith("KXNBA"):
                     continue
-                if home in ticker_upper and away in ticker_upper:
-                    matched.append(ticker)
+
+                is_prop = "PLAYERPTS" in ticker_upper or (
+                    "PTS" in ticker_upper
+                    and "GAME" not in ticker_upper
+                    and "TOTAL" not in ticker_upper
+                )
+                if is_prop:
+                    if home in ticker_upper or away in ticker_upper:
+                        matched.append(ticker)
+                elif "GAME" in ticker_upper or "TOTAL" in ticker_upper:
+                    if home in ticker_upper and away in ticker_upper:
+                        matched.append(ticker)
 
             if matched:
                 self._game_to_tickers[game_id] = matched

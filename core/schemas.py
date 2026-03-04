@@ -48,6 +48,32 @@ class Action(StrEnum):
 # Domain Models
 # ---------------------------------------------------------------------------
 
+class PlayerBoxScore(BaseModel):
+    """Single player's live box score stats within a game."""
+
+    model_config = ConfigDict(frozen=True)
+
+    player_id: str
+    first_name: str
+    last_name: str
+    team_abbr: str = ""
+    minutes: float = 0.0
+    pts: int = 0
+    fgm: int = 0
+    fga: int = 0
+    fg3m: int = 0
+    fg3a: int = 0
+    ftm: int = 0
+    fta: int = 0
+    reb: int = 0
+    ast: int = 0
+    stl: int = 0
+    blk: int = 0
+    turnover: int = 0
+    pf: int = 0
+    plus_minus: int = 0
+
+
 class GameState(BaseModel):
     """Live game state pushed by the sports data watcher."""
 
@@ -63,6 +89,7 @@ class GameState(BaseModel):
     quarter: int
     clock: str
     timestamp: datetime
+    player_stats: list[PlayerBoxScore] = Field(default_factory=list)
 
 
 class MarketState(BaseModel):
@@ -179,6 +206,7 @@ class AppSettings(BaseSettings):
     SPORTS_API_KEY: str = ""
     SPORTS_API_WS_URL: str = ""
     BALLDONTLIE_API_KEY: str = ""
+    BALLDONTLIE_TIER: str = "all-star"  # "free", "all-star", or "goat"
     SPORTS_POLL_INTERVAL: float = 15.0
 
     # LLM — provider selection: "openai", "anthropic", or "gemini"
