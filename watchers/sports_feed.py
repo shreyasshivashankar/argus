@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import AsyncIterator
 
 import aiohttp
@@ -160,8 +160,13 @@ class BalldontlieFeed(SportsFeed):
         assert self._session is not None
         while self._running:
             try:
-                today = datetime.utcnow().strftime("%Y-%m-%d")
-                url = f"{self._BASE_URL}/games?dates[]={today}&per_page=100"
+                now = datetime.utcnow()
+                today = now.strftime("%Y-%m-%d")
+                yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+                url = (
+                    f"{self._BASE_URL}/games"
+                    f"?dates[]={yesterday}&dates[]={today}&per_page=100"
+                )
                 async with self._session.get(url) as resp:
                     if resp.status == 401:
                         logger.error("Balldontlie 401 — check BALLDONTLIE_API_KEY")
