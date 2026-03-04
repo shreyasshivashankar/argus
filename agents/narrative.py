@@ -150,14 +150,19 @@ class GeminiProvider(LLMProvider):
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "maxOutputTokens": 200,
+                "maxOutputTokens": 1024,
                 "temperature": 0.0,
             },
         }
 
         async with session.post(self._url, json=payload) as resp:
             data = await resp.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+            candidate = data.get("candidates", [{}])[0]
+            parts = candidate.get("content", {}).get("parts", [])
+            if not parts:
+                reason = candidate.get("finishReason", "unknown")
+                raise ValueError(f"Gemini returned no content (finishReason={reason})")
+            return parts[0]["text"]
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
