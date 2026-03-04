@@ -240,6 +240,11 @@ class NarrativeAgent(BaseAgent):
     async def _context_loop(self) -> None:
         """Periodically query the LLM for each active game and update the cache."""
         while self._running:
+            if self._active_games:
+                self.log.info(
+                    "Evaluating context for {} active game(s)",
+                    len(self._active_games),
+                )
             for game_id, game in list(self._active_games.items()):
                 await self._evaluate_context(game_id, game)
             await asyncio.sleep(self.settings.CONTEXT_POLL_INTERVAL)
@@ -273,7 +278,7 @@ class NarrativeAgent(BaseAgent):
             await self.bus.set_context(
                 game_id, ContextStatus.SAFE, ttl=self.settings.CONTEXT_TTL
             )
-            self.log.debug("Context SAFE for game {}", game_id)
+            self.log.info("Context SAFE for game {}", game_id)
         else:
             reason = response[5:].strip() if response.upper().startswith("VETO") else response
             await self.bus.set_context(

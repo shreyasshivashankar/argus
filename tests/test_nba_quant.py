@@ -119,9 +119,10 @@ class TestNoMapping:
 
     @pytest.mark.asyncio
     async def test_unmapped_game_skipped(self, quant, mock_bus):
+        """Game with no matching Kalshi ticker should not produce a signal."""
         gs = make_game_state(game_id="unmapped-game")
         quant._games["unmapped-game"] = gs
-        quant._markets["NBA-YES-LAL"] = make_market_state()
+        quant._markets["NFL-SPREAD-KC"] = make_market_state(ticker="NFL-SPREAD-KC")
         _force_high_ev(quant)
 
         await quant._evaluate_all()

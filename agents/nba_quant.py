@@ -64,6 +64,10 @@ class NBAQuantAgent(BaseAgent):
         # Portfolio state from the executor (updated via portfolio:state channel)
         self._portfolio: PortfolioState | None = None
 
+        # Throttle sets: prevent repeating the same INFO log every poll cycle
+        self._logged_games: set[str] = set()
+        self._logged_unmapped: set[str] = set()
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -112,9 +116,18 @@ class NBAQuantAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     async def _evaluate_all(self) -> None:
+        self._auto_map_tickers()
+
         for game_id, game in self._games.items():
+            if game_id not in self._logged_games:
+                self.log.info("Tracking live game: {} @ {}", game.away_team, game.home_team)
+                self._logged_games.add(game_id)
+
             ticker = self._game_to_ticker.get(game_id)
             if not ticker or ticker not in self._markets:
+                if game_id not in self._logged_unmapped:
+                    self.log.info("No Kalshi market mapping for game {}", game_id)
+                    self._logged_unmapped.add(game_id)
                 continue
             market = self._markets[ticker]
             await self._evaluate(game, market)
@@ -281,7 +294,19 @@ class NBAQuantAgent(BaseAgent):
     # Market mapping
     # ------------------------------------------------------------------
 
+    def _auto_map_tickers(self) -> None:
+        """Attempt to map live games to Kalshi markets by team name in ticker."""
+        for game_id, game in self._games.items():
+            if game_id in self._game_to_ticker:
+                continue
+            for ticker in self._markets:
+                ticker_upper = ticker.upper()
+                if game.home_team.upper() in ticker_upper or game.away_team.upper() in ticker_upper:
+                    self.register_game_market(game_id, ticker)
+                    break
+
     def register_game_market(self, game_id: str, ticker: str) -> None:
         """Map a live game to its Kalshi market ticker."""
         self._game_to_ticker[game_id] = ticker
+        self._logged_unmapped.discard(game_id)
         self.log.info("Mapped game {} → ticker {}", game_id, ticker)

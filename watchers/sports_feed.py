@@ -173,16 +173,20 @@ class BalldontlieFeed(SportsFeed):
                         continue
                     resp.raise_for_status()
                     data = await resp.json()
+                    games = data.get("data", [])
                     live_count = 0
-                    for game in data.get("data", []):
+                    for game in games:
                         if game.get("status") not in _LIVE_STATUSES:
                             continue
                         gs = self._parse(game)
                         if gs:
                             live_count += 1
                             yield gs
-                    if live_count:
-                        logger.debug("Balldontlie: {} live games", live_count)
+                    statuses = {g.get("status", "?") for g in games}
+                    logger.info(
+                        "Balldontlie poll: {} total, {} live | statuses: {}",
+                        len(games), live_count, statuses or "none",
+                    )
             except aiohttp.ClientError:
                 logger.exception("Balldontlie poll failed (network)")
             except Exception:

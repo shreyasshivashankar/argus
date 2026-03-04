@@ -102,6 +102,10 @@ class PaperExecutor(BaseAgent):
                 if self.current_bankroll <= 0:
                     self.current_bankroll = self._DEFAULT_PAPER_BANKROLL
                 self.log.debug("Balance poll failed, using paper bankroll ${:.2f}", self.current_bankroll)
+            self.log.info(
+                "[PAPER] Bankroll: ${:.2f} | {} resting exits",
+                self.current_bankroll, len(self._resting_exits),
+            )
             await asyncio.sleep(self.settings.BALANCE_POLL_INTERVAL)
 
     # ------------------------------------------------------------------
