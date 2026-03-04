@@ -69,6 +69,9 @@ class NBAQuantAgent(BaseAgent):
         self._logged_unmapped: set[str] = set()
         self._logged_tickers: set[str] = set()
 
+        # Per-ticker cooldown to prevent signal spam
+        self._signal_cooldowns: dict[str, datetime] = {}
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -158,6 +161,11 @@ class NBAQuantAgent(BaseAgent):
             )
             return
 
+        now = datetime.utcnow()
+        last_signal = self._signal_cooldowns.get(market.ticker)
+        if last_signal and (now - last_signal).total_seconds() < 60:
+            return
+
         exit_price = entry_price_cents + self.settings.TARGET_EXIT_SPREAD
 
         if self._can_fund_trade(entry_price_cents):
@@ -173,6 +181,7 @@ class NBAQuantAgent(BaseAgent):
                 exit_price=exit_price,
                 game_id=game.game_id,
             )
+            self._signal_cooldowns[market.ticker] = now
             await self.bus.publish("signal:validated", signal)
             self.log.info(
                 "+EV signal: {} EV={:.4f} entry={} exit={} model_p={:.3f} implied_p={:.3f}",
@@ -299,7 +308,7 @@ class NBAQuantAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _auto_map_tickers(self) -> None:
-        """Attempt to map live games to Kalshi markets by team abbreviation in ticker."""
+        """Attempt to map live games to Kalshi NBA markets by team abbreviation."""
         for game_id, game in self._games.items():
             if game_id in self._game_to_ticker:
                 continue
@@ -307,6 +316,8 @@ class NBAQuantAgent(BaseAgent):
             away = game.away_abbr.upper() if game.away_abbr else game.away_team.upper()
             for ticker in self._markets:
                 ticker_upper = ticker.upper()
+                if not ticker_upper.startswith("KXNBA"):
+                    continue
                 if home in ticker_upper or away in ticker_upper:
                     self.register_game_market(game_id, ticker)
                     break
