@@ -51,7 +51,7 @@ class Action(StrEnum):
 class GameState(BaseModel):
     """Live game state pushed by the sports data watcher."""
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     game_id: str
     home_team: str
@@ -66,7 +66,7 @@ class GameState(BaseModel):
 class MarketState(BaseModel):
     """Live Kalshi order book state pushed by the Kalshi WS watcher."""
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     ticker: str
     yes_bid: int

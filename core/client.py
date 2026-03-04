@@ -91,7 +91,8 @@ class KalshiAsyncClient:
     ) -> dict:
         session = await self._ensure_session()
         url = f"{self._base_url}{path}"
-        headers = self._auth_headers(method, path)
+        sign_path = f"/trade-api/v2{path}"
+        headers = self._auth_headers(method, sign_path)
 
         last_exc: Optional[Exception] = None
         for attempt in range(_MAX_RETRIES):
