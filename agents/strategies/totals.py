@@ -14,7 +14,7 @@ import re
 from agents.strategies.base import BaseStrategy
 from core.schemas import Action, GameState, MarketState, Side, Signal, SignalStatus
 
-_LINE_RE = re.compile(r"[OU](\d+(?:\.\d+)?)", re.IGNORECASE)
+_LINE_RE = re.compile(r"[OUT](\d+(?:\.\d+)?)", re.IGNORECASE)
 _MINUTES_PER_GAME = 48.0
 
 
@@ -45,6 +45,9 @@ class TotalsStrategy(BaseStrategy):
 
     def evaluate(self, game: GameState, market: MarketState) -> Signal | None:
         if market.yes_ask <= 0:
+            return None
+
+        if game.quarter > 4:
             return None
 
         line = self._extract_line(market.ticker)
