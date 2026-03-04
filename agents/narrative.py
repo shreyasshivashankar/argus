@@ -67,8 +67,14 @@ class OpenAIProvider(LLMProvider):
             "https://api.openai.com/v1/chat/completions",
             json=payload,
         ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(f"OpenAI API HTTP {resp.status}: {error_text}")
             data = await resp.json()
-            return data["choices"][0]["message"]["content"]
+            choices = data.get("choices", [])
+            if not choices:
+                raise ValueError(f"OpenAI returned no choices. Raw: {data}")
+            return choices[0]["message"]["content"]
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
@@ -111,8 +117,15 @@ class AnthropicProvider(LLMProvider):
         }
 
         async with session.post(self._URL, json=payload) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(f"Anthropic API HTTP {resp.status}: {error_text}")
             data = await resp.json()
-            return data["content"][0]["text"]
+            content = data.get("content", [])
+            if not content:
+                stop = data.get("stop_reason", "unknown")
+                raise ValueError(f"Anthropic returned no content (stop_reason={stop})")
+            return content[0]["text"]
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
@@ -156,12 +169,23 @@ class GeminiProvider(LLMProvider):
         }
 
         async with session.post(self._url, json=payload) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(f"Gemini API HTTP {resp.status}: {error_text}")
+
             data = await resp.json()
+
+            if "promptFeedback" in data and "blockReason" in data["promptFeedback"]:
+                reason = data["promptFeedback"]["blockReason"]
+                raise ValueError(f"Gemini safety block triggered: {reason}")
+
             candidate = data.get("candidates", [{}])[0]
             parts = candidate.get("content", {}).get("parts", [])
             if not parts:
                 reason = candidate.get("finishReason", "unknown")
-                raise ValueError(f"Gemini returned no content (finishReason={reason})")
+                raise ValueError(
+                    f"Gemini returned no text (finishReason={reason}). Raw: {data}"
+                )
             return parts[0]["text"]
 
     async def close(self) -> None:
