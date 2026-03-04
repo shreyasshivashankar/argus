@@ -213,9 +213,6 @@ class AppSettings(BaseSettings):
     BALLDONTLIE_API_KEY: str = ""
     BALLDONTLIE_TIER: str = "all-star"  # "free", "all-star", or "goat"
 
-    # Legacy — kept for backwards compat, unused if SPORTS_PROVIDER is set
-    SPORTS_API_KEY: str = ""
-    SPORTS_API_WS_URL: str = ""
     SPORTS_POLL_INTERVAL: float = 15.0
 
     # LLM — provider selection: "openai", "anthropic", or "gemini"

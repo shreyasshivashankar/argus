@@ -37,8 +37,6 @@ def settings() -> AppSettings:
         KALSHI_PRIVATE_KEY_PATH="/dev/null",
         KALSHI_ENV="demo",
         REDIS_URL="redis://localhost:6379",
-        SPORTS_API_KEY="",
-        SPORTS_API_WS_URL="",
         OPENAI_API_KEY="test-llm-key",
         OPENAI_MODEL="gpt-4o-mini",
         TELEGRAM_CHAT_ID="",
