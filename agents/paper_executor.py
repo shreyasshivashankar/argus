@@ -91,12 +91,17 @@ class PaperExecutor(BaseAgent):
     # Background bankroll cache (same as production)
     # ------------------------------------------------------------------
 
+    _DEFAULT_PAPER_BANKROLL: float = 1000.0
+
     async def _balance_poll_loop(self) -> None:
         while self._running:
             try:
-                self.current_bankroll = await self.client.get_balance()
+                balance = await self.client.get_balance()
+                self.current_bankroll = balance if balance > 0 else self._DEFAULT_PAPER_BANKROLL
             except Exception:
-                self.log.exception("Balance poll failed")
+                if self.current_bankroll <= 0:
+                    self.current_bankroll = self._DEFAULT_PAPER_BANKROLL
+                self.log.debug("Balance poll failed, using paper bankroll ${:.2f}", self.current_bankroll)
             await asyncio.sleep(self.settings.BALANCE_POLL_INTERVAL)
 
     # ------------------------------------------------------------------
