@@ -54,7 +54,6 @@ SPORTS_PROVIDER=sportradar       # "sportradar" (production) or "balldontlie" (p
 ```
 SPORTRADAR_API_KEY=your-key-here
 SPORTRADAR_ACCESS_LEVEL=production
-SPORTRADAR_SEASON=2025           # starting year of the NBA season
 ```
 
 **Balldontlie (paper/research)** -- REST polling. Cheaper but higher latency. Get a key at [app.balldontlie.io](https://app.balldontlie.io/):

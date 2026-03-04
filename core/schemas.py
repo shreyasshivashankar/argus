@@ -208,7 +208,6 @@ class AppSettings(BaseSettings):
     # Sportradar (production)
     SPORTRADAR_API_KEY: str = ""
     SPORTRADAR_ACCESS_LEVEL: str = "production"  # "trial" or "production"
-    SPORTRADAR_SEASON: str = "2025"  # starting year of season (2025 = 2025-26)
 
     # Balldontlie (paper/research)
     BALLDONTLIE_API_KEY: str = ""

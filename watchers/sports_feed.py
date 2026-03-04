@@ -87,7 +87,6 @@ class SportradarFeed(SportsFeed):
         super().__init__(settings, bus)
         self._api_key = settings.SPORTRADAR_API_KEY
         self._access = settings.SPORTRADAR_ACCESS_LEVEL
-        self._season = settings.SPORTRADAR_SEASON
         self._session: aiohttp.ClientSession | None = None
 
         self._game_meta: dict[str, dict] = {}
