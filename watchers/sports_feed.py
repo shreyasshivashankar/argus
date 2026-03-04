@@ -209,6 +209,8 @@ class BalldontlieFeed(SportsFeed):
                 game_id=str(game["id"]),
                 home_team=game["home_team"]["full_name"],
                 away_team=game["visitor_team"]["full_name"],
+                home_abbr=game["home_team"].get("abbreviation", ""),
+                away_abbr=game["visitor_team"].get("abbreviation", ""),
                 home_score=game.get("home_team_score", 0),
                 away_score=game.get("visitor_team_score", 0),
                 quarter=quarter,

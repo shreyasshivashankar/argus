@@ -67,6 +67,7 @@ class NBAQuantAgent(BaseAgent):
         # Throttle sets: prevent repeating the same INFO log every poll cycle
         self._logged_games: set[str] = set()
         self._logged_unmapped: set[str] = set()
+        self._logged_tickers: set[str] = set()
 
     # ------------------------------------------------------------------
     # Main loop
@@ -102,6 +103,9 @@ class NBAQuantAgent(BaseAgent):
         try:
             ms = MarketState(**data)
             self._markets[ms.ticker] = ms
+            if ms.ticker not in self._logged_tickers:
+                self.log.info("New Kalshi market: {} bid={} ask={}", ms.ticker, ms.yes_bid, ms.yes_ask)
+                self._logged_tickers.add(ms.ticker)
         except Exception:
             self.log.warning("Bad market:state payload: {}", data)
 
@@ -295,13 +299,15 @@ class NBAQuantAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _auto_map_tickers(self) -> None:
-        """Attempt to map live games to Kalshi markets by team name in ticker."""
+        """Attempt to map live games to Kalshi markets by team abbreviation in ticker."""
         for game_id, game in self._games.items():
             if game_id in self._game_to_ticker:
                 continue
+            home = game.home_abbr.upper() if game.home_abbr else game.home_team.upper()
+            away = game.away_abbr.upper() if game.away_abbr else game.away_team.upper()
             for ticker in self._markets:
                 ticker_upper = ticker.upper()
-                if game.home_team.upper() in ticker_upper or game.away_team.upper() in ticker_upper:
+                if home in ticker_upper or away in ticker_upper:
                     self.register_game_market(game_id, ticker)
                     break
 

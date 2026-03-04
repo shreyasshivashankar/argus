@@ -184,13 +184,15 @@ class NarrativeAgent(BaseAgent):
 
     # Focused prompt template — kept tight so the LLM responds fast
     _PROMPT_TEMPLATE = (
-        "You are a real-time NBA game analyst. For the game {home} vs {away} "
-        "(currently Q{quarter}, {clock}), answer ONLY with 'SAFE' if there is "
-        "no critical negative context, or 'VETO: <reason>' if there is.\n\n"
-        "Critical negative context includes: star player injuries, ejections, "
-        "technical fouls on key players, or any event that would drastically "
-        "change the expected outcome.\n\n"
-        "Your answer (one word or one short sentence):"
+        "You are an NBA game context monitor for an automated trading system. "
+        "For the game {home} vs {away} (currently Q{quarter}, {clock}):\n\n"
+        "Answer ONLY 'SAFE' unless you have SPECIFIC knowledge of a critical "
+        "negative event that happened in THIS game — such as a star player "
+        "injury, ejection, or technical foul on a key player.\n\n"
+        "If you do not have specific information about a negative event, "
+        "answer 'SAFE'. Do NOT speculate. Do NOT veto based on score or "
+        "general uncertainty.\n\n"
+        "Your answer (SAFE or VETO: <reason>):"
     )
 
     def __init__(
@@ -273,6 +275,8 @@ class NarrativeAgent(BaseAgent):
                 ttl=self.settings.CONTEXT_TTL,
             )
             return
+
+        self.log.info("LLM response for game {}: '{}'", game_id, response[:120])
 
         if response.upper().startswith("SAFE"):
             await self.bus.set_context(
