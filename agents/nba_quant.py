@@ -1,3 +1,13 @@
+"""OmniQuant Agent — multi-strategy portfolio manager for NBA markets.
+
+Subscribes to ``game:state``, ``market:state``, and ``portfolio:state``.
+On every update it fans out evaluation to all registered strategies,
+ranks the proposals by EV, applies a correlation filter (max 1 open
+position per game), and fires the best signal.
+
+Strategies are pluggable via the constructor; add new ones without
+touching this file.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -5,9 +15,10 @@ import math
 from datetime import datetime
 from typing import Any
 
-import numpy as np
 from loguru import logger
 
+from agents.strategies import MoneylineStrategy, TotalsStrategy
+from agents.strategies.base import BaseStrategy
 from core.base_agent import BaseAgent
 from core.bus import SignalBus
 from core.client import KalshiAsyncClient
@@ -25,19 +36,11 @@ from core.schemas import (
 
 
 class NBAQuantAgent(BaseAgent):
-    """Stage 1: Synchronous Quant Trigger for NBA markets.
+    """Multi-strategy quant agent for NBA markets.
 
-    Subscribes to ``game:state`` and ``market:state``.  On every update the
-    hot path runs without external async I/O:
-
-    1. Derive implied probability from Kalshi bid/ask.
-    2. Compute model probability from game state + historical reversal data.
-    3. If +EV exceeds threshold → synchronous ``redis.get`` context check
-       (fail-close: None → VETO).
-    4. If SAFE → publish VALIDATED signal directly to ``signal:validated``.
-
-    To add a new sport, subclass BaseAgent with the same pattern and plug
-    in sport-specific probability models.
+    Replaces the monolithic single-model approach with a Strategy Pattern:
+    each strategy independently evaluates markets it understands, and this
+    agent ranks, filters, and publishes the best opportunity.
     """
 
     def __init__(
@@ -45,31 +48,35 @@ class NBAQuantAgent(BaseAgent):
         settings: AppSettings,
         bus: SignalBus,
         client: KalshiAsyncClient,
+        strategies: list[BaseStrategy] | None = None,
     ) -> None:
         super().__init__("nba_quant", settings, bus, client)
 
-        # Latest state caches (updated on every WS push)
+        self._strategies: list[BaseStrategy] = strategies or [
+            MoneylineStrategy(
+                ev_threshold=settings.EV_THRESHOLD / 100.0,
+                target_exit_spread=settings.TARGET_EXIT_SPREAD,
+            ),
+            TotalsStrategy(
+                ev_threshold=settings.EV_THRESHOLD / 100.0,
+                target_exit_spread=settings.TARGET_EXIT_SPREAD,
+            ),
+        ]
+
         self._games: dict[str, GameState] = {}
         self._markets: dict[str, MarketState] = {}
 
-        # game_id → market_ticker mapping (configured externally or discovered)
-        self._game_to_ticker: dict[str, str] = {}
+        # game_id -> list of matched market tickers
+        self._game_to_tickers: dict[str, list[str]] = {}
 
-        # Pre-loaded reversal probability table: (quarter, score_diff) → p(win)
-        # Populated from historical backtest data in data/
-        self._reversal_table: dict[tuple[int, int], float] = (
-            self._load_reversal_table()
-        )
-
-        # Portfolio state from the executor (updated via portfolio:state channel)
         self._portfolio: PortfolioState | None = None
 
-        # Throttle sets: prevent repeating the same INFO log every poll cycle
+        # Throttle sets
         self._logged_games: set[str] = set()
         self._logged_unmapped: set[str] = set()
         self._logged_tickers: set[str] = set()
 
-        # Per-ticker cooldown to prevent signal spam
+        # Per-ticker cooldown
         self._signal_cooldowns: dict[str, datetime] = {}
 
     # ------------------------------------------------------------------
@@ -107,7 +114,10 @@ class NBAQuantAgent(BaseAgent):
             ms = MarketState(**data)
             self._markets[ms.ticker] = ms
             if ms.ticker not in self._logged_tickers:
-                self.log.info("New Kalshi market: {} bid={} ask={}", ms.ticker, ms.yes_bid, ms.yes_ask)
+                self.log.info(
+                    "New Kalshi market: {} bid={} ask={}",
+                    ms.ticker, ms.yes_bid, ms.yes_ask,
+                )
                 self._logged_tickers.add(ms.ticker)
         except Exception:
             self.log.warning("Bad market:state payload: {}", data)
@@ -119,7 +129,7 @@ class NBAQuantAgent(BaseAgent):
             self.log.warning("Bad portfolio:state payload: {}", data)
 
     # ------------------------------------------------------------------
-    # Core evaluation — no external I/O in the hot path
+    # Core evaluation
     # ------------------------------------------------------------------
 
     async def _evaluate_all(self) -> None:
@@ -127,77 +137,78 @@ class NBAQuantAgent(BaseAgent):
 
         for game_id, game in self._games.items():
             if game_id not in self._logged_games:
-                self.log.info("Tracking live game: {} @ {}", game.away_team, game.home_team)
+                self.log.info(
+                    "Tracking live game: {} @ {}",
+                    game.away_team, game.home_team,
+                )
                 self._logged_games.add(game_id)
 
-            ticker = self._game_to_ticker.get(game_id)
-            if not ticker or ticker not in self._markets:
+            tickers = self._game_to_tickers.get(game_id, [])
+            if not tickers:
                 if game_id not in self._logged_unmapped:
                     self.log.info("No Kalshi market mapping for game {}", game_id)
                     self._logged_unmapped.add(game_id)
                 continue
-            market = self._markets[ticker]
-            await self._evaluate(game, market)
 
-    async def _evaluate(self, game: GameState, market: MarketState) -> None:
-        if market.yes_ask <= 0:
-            return
+            # Gather proposals from all strategies across all markets for this game
+            proposals: list[Signal] = []
+            for ticker in tickers:
+                market = self._markets.get(ticker)
+                if market is None:
+                    continue
+                for strategy in self._strategies:
+                    if not strategy.can_evaluate(market):
+                        continue
+                    signal = strategy.evaluate(game, market)
+                    if signal is not None:
+                        proposals.append(signal)
 
-        target_team = market.ticker.split("-")[-1]
-        implied_prob = market.yes_ask / 100.0
-        model_prob = self._model_probability(game, target_team)
-        payout = 1.0  # Kalshi binary: $1 payout
-        entry_price_cents = market.yes_ask
-        ev = model_prob * payout - (entry_price_cents / 100.0)
+            if not proposals:
+                continue
 
-        if ev < self.settings.EV_THRESHOLD / 100.0:
-            return
+            # Rank by EV, best first
+            proposals.sort(key=lambda s: s.ev_estimate, reverse=True)
+            best = proposals[0]
 
-        # --- Synchronous context cache read (fail-close) ---
+            await self._try_execute(best, game)
+
+    async def _try_execute(self, signal: Signal, game: GameState) -> None:
+        """Context check, cooldown, capital check, and publish."""
+        # --- Fail-close context check ---
         status, reason = await self.bus.get_context(game.game_id)
-
         if status != ContextStatus.SAFE:
             self.log.info(
-                "VETO for {} ({}): {}", game.game_id, market.ticker, reason
+                "VETO for {} ({}): {}", game.game_id, signal.ticker, reason
             )
             return
 
+        # --- Per-ticker cooldown ---
         now = datetime.utcnow()
-        last_signal = self._signal_cooldowns.get(market.ticker)
-        if last_signal and (now - last_signal).total_seconds() < 60:
+        last = self._signal_cooldowns.get(signal.ticker)
+        if last and (now - last).total_seconds() < 60:
             return
 
-        exit_price = min(entry_price_cents + self.settings.TARGET_EXIT_SPREAD, 99)
+        entry_price_cents = signal.entry_price
 
         if self._can_fund_trade(entry_price_cents):
-            signal = Signal(
-                ticker=market.ticker,
-                action=Action.BUY,
-                side=Side.YES,
-                status=SignalStatus.VALIDATED,
-                confidence=min(model_prob, 1.0),
-                source=self.name,
-                ev_estimate=ev,
-                entry_price=entry_price_cents,
-                exit_price=exit_price,
-                game_id=game.game_id,
-            )
-            self._signal_cooldowns[market.ticker] = now
+            self._signal_cooldowns[signal.ticker] = now
             await self.bus.publish("signal:validated", signal)
             self.log.info(
-                "+EV signal: {} EV={:.4f} entry={} exit={} model_p={:.3f} implied_p={:.3f}",
-                market.ticker, ev, entry_price_cents, exit_price,
-                model_prob, implied_prob,
+                "+EV signal [{}]: {} EV={:.4f} entry={} exit={} conf={:.3f}",
+                signal.source, signal.ticker, signal.ev_estimate,
+                signal.entry_price, signal.exit_price, signal.confidence,
             )
         else:
-            await self._try_reallocate(ev, entry_price_cents, model_prob, market, game)
+            await self._try_reallocate(
+                signal.ev_estimate, entry_price_cents,
+                signal.confidence, self._markets[signal.ticker], game,
+            )
 
     # ------------------------------------------------------------------
     # Capital awareness
     # ------------------------------------------------------------------
 
     def _can_fund_trade(self, entry_price_cents: int) -> bool:
-        """Check if the cached bankroll can fund at least 1 contract."""
         if self._portfolio is None:
             return True
         bankroll_cents = self._portfolio.bankroll * 100
@@ -222,7 +233,6 @@ class NBAQuantAgent(BaseAgent):
                 continue
 
             live_bid = ms.yes_bid
-
             if live_bid < self.settings.MIN_REALLOCATE_BID:
                 continue
 
@@ -234,7 +244,6 @@ class NBAQuantAgent(BaseAgent):
                 continue
 
             total_new_ev_cents = expected_new_count * (new_ev * 100)
-
             foregone_profit = (pos.target_exit_price - live_bid) * pos.remaining_count
             fees = pos.remaining_count * self.settings.TAKER_FEE_CENTS
 
@@ -264,70 +273,41 @@ class NBAQuantAgent(BaseAgent):
             return
 
     # ------------------------------------------------------------------
-    # Probability model
-    # ------------------------------------------------------------------
-
-    def _model_probability(self, game: GameState, target_team: str) -> float:
-        """Compute win probability for ``target_team`` from live game state.
-
-        The logistic core always estimates the *home* team's win probability.
-        If the ticker targets the away team, we return 1 - home_prob.
-        """
-        diff = game.away_score - game.home_score  # positive = away leading
-        quarter = game.quarter
-
-        cached = self._reversal_table.get((quarter, diff))
-        home_prob = cached if cached is not None else self._logistic_estimate(diff, quarter)
-
-        home_ids = [game.home_abbr.upper(), game.home_team.upper()]
-        if target_team.upper() in home_ids:
-            return home_prob
-        return 1.0 - home_prob
-
-    @staticmethod
-    def _logistic_estimate(score_diff: int, quarter: int) -> float:
-        """Fallback logistic model: P(underdog wins) given score diff and quarter.
-
-        Higher quarters amplify the impact of the deficit because there is
-        less time to recover.
-        """
-        quarter_weight = 1.0 + (quarter - 1) * 0.3
-        z = -0.15 * score_diff * quarter_weight
-        return float(1.0 / (1.0 + np.exp(-z)))
-
-    @staticmethod
-    def _load_reversal_table() -> dict[tuple[int, int], float]:
-        """Load historical reversal probabilities from data/.
-
-        Returns an empty dict if no backtest data is available yet.
-        Populate by running the Balldontlie backtest pipeline.
-        """
-        # TODO: load from data/nba_reversal_probs.csv once backtest is run
-        return {}
-
-    # ------------------------------------------------------------------
     # Market mapping
     # ------------------------------------------------------------------
 
     def _auto_map_tickers(self) -> None:
-        """Attempt to map live games to Kalshi NBA daily game markets."""
+        """Map live games to all matching Kalshi NBA market tickers.
+
+        A game can map to multiple tickers (moneyline, totals, spreads).
+        Each ticker must contain both team abbreviations to confirm
+        it belongs to this specific matchup.
+        """
         for game_id, game in self._games.items():
-            if game_id in self._game_to_ticker:
+            if game_id in self._game_to_tickers:
                 continue
 
             home = game.home_abbr.upper() if game.home_abbr else game.home_team.upper()
             away = game.away_abbr.upper() if game.away_abbr else game.away_team.upper()
 
+            matched: list[str] = []
             for ticker in self._markets:
                 ticker_upper = ticker.upper()
-                if "GAME" not in ticker_upper:
+                if not ticker_upper.startswith("KXNBA"):
                     continue
                 if home in ticker_upper and away in ticker_upper:
-                    self.register_game_market(game_id, ticker)
-                    break
+                    matched.append(ticker)
+
+            if matched:
+                self._game_to_tickers[game_id] = matched
+                self._logged_unmapped.discard(game_id)
+                for t in matched:
+                    self.log.info("Mapped game {} → ticker {}", game_id, t)
 
     def register_game_market(self, game_id: str, ticker: str) -> None:
-        """Map a live game to its Kalshi market ticker."""
-        self._game_to_ticker[game_id] = ticker
+        """Manually map a game to a market ticker."""
+        tickers = self._game_to_tickers.setdefault(game_id, [])
+        if ticker not in tickers:
+            tickers.append(ticker)
         self._logged_unmapped.discard(game_id)
         self.log.info("Mapped game {} → ticker {}", game_id, ticker)

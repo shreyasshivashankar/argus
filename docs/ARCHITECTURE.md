@@ -134,17 +134,27 @@ Single authenticated WebSocket connection to `wss://api.elections.kalshi.com/tra
 
 Exposes `on_fill(callback)` and `on_order_update(callback)` for the executor to register handlers.
 
-### `agents/nba_quant.py` -- Quant Trigger
+### `agents/nba_quant.py` -- OmniQuant Agent (Strategy Pattern)
 
-Subscribes to `game:state` and `market:state`. The entire hot path runs without any async I/O to external services:
+Multi-strategy portfolio manager. Subscribes to `game:state`, `market:state`, and `portfolio:state`. Uses a pluggable Strategy Pattern:
 
-1. On each game/market update, compute implied probability from Kalshi bid/ask
-2. Compute model probability from game state using pre-loaded historical reversal data
-3. If `model_prob * payout - entry_price > EV_THRESHOLD`:
-   - Synchronous `redis.get("game:context:{game_id}")` -- microsecond cache read
-   - If `SAFE`: publish `Signal(status=VALIDATED)` directly to `signal:validated`
-   - If `VETO`: log reason and drop
-   - If `None` (key expired / missing): treat as `VETO` (fail-close). Log warning that context is stale or Narrative is down. Never trade blind.
+**Architecture:**
+- `agents/strategies/base.py` -- `BaseStrategy` ABC with `can_evaluate(market)` and `evaluate(game, market) -> Signal | None`
+- `agents/strategies/moneyline.py` -- Logistic reversal model for game-winner (GAME) tickers. Directional: resolves which team the ticker targets.
+- `agents/strategies/totals.py` -- Pace projection model for over/under (TOTAL) tickers. Projects final score from current pace, compares to Kalshi line.
+
+**Evaluation flow (no external async I/O in the hot path):**
+
+1. On each game/market update, auto-map games to all matching KXNBA tickers (multiple per game: moneyline, totals, spreads)
+2. For each game, fan out to all registered strategies across all mapped markets
+3. Collect proposals, rank by EV (highest first)
+4. Take the best proposal and run it through the context + cooldown + capital pipeline:
+   - Synchronous `redis.get("game:context:{game_id}")` -- fail-close if missing
+   - 60-second per-ticker cooldown to prevent signal spam
+   - If bankroll insufficient, evaluate reallocation hurdle rate
+5. If all checks pass, publish `Signal(status=VALIDATED)` to `signal:validated`
+
+**Adding a new strategy:** Create a new file in `agents/strategies/`, implement `BaseStrategy`, and add it to the `strategies` list in the `NBAQuantAgent` constructor. No changes to the agent itself.
 
 ### `agents/narrative.py` -- Out-of-Band Context Monitor
 

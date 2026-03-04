@@ -1,4 +1,4 @@
-"""Tests for NBAQuantAgent: context cache, fail-close, signal gating, and reallocation."""
+"""Tests for NBAQuantAgent (OmniQuant): strategy pattern, context, cooldown, reallocation."""
 from __future__ import annotations
 
 import math
@@ -6,7 +6,17 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.schemas import ContextStatus, PortfolioState, SignalStatus
+from agents.strategies.base import BaseStrategy
+from core.schemas import (
+    Action,
+    ContextStatus,
+    GameState,
+    MarketState,
+    PortfolioState,
+    Side,
+    Signal,
+    SignalStatus,
+)
 from agents.nba_quant import NBAQuantAgent
 from tests.conftest import (
     make_game_state,
@@ -16,24 +26,76 @@ from tests.conftest import (
 )
 
 
+# ---------------------------------------------------------------------------
+# A controllable stub strategy used in tests
+# ---------------------------------------------------------------------------
+
+class _StubStrategy(BaseStrategy):
+    """Always-match strategy whose evaluate result is externally controllable."""
+
+    name = "stub"
+
+    def __init__(self) -> None:
+        self.signal_to_return: Signal | None = None
+
+    def can_evaluate(self, market: MarketState) -> bool:
+        return True
+
+    def evaluate(self, game: GameState, market: MarketState) -> Signal | None:
+        return self.signal_to_return
+
+
+def _make_high_ev_signal(ticker: str = "NBA-YES-LAL", game_id: str = "game-001") -> Signal:
+    return Signal(
+        ticker=ticker,
+        action=Action.BUY,
+        side=Side.YES,
+        status=SignalStatus.VALIDATED,
+        confidence=0.95,
+        source="stub",
+        ev_estimate=0.50,
+        entry_price=16,
+        exit_price=23,
+        game_id=game_id,
+    )
+
+
+def _make_low_ev_signal(ticker: str = "NBA-YES-LAL", game_id: str = "game-001") -> Signal:
+    return Signal(
+        ticker=ticker,
+        action=Action.BUY,
+        side=Side.YES,
+        status=SignalStatus.VALIDATED,
+        confidence=0.10,
+        source="stub",
+        ev_estimate=-0.05,
+        entry_price=16,
+        exit_price=23,
+        game_id=game_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
 @pytest.fixture
-def quant(settings, mock_bus, mock_client):
-    agent = NBAQuantAgent(settings, mock_bus, mock_client)
+def stub_strategy():
+    return _StubStrategy()
+
+
+@pytest.fixture
+def quant(settings, mock_bus, mock_client, stub_strategy):
+    agent = NBAQuantAgent(settings, mock_bus, mock_client, strategies=[stub_strategy])
     agent.register_game_market("game-001", "NBA-YES-LAL")
     return agent
 
 
 def _inject_state(quant: NBAQuantAgent, game_state=None, market_state=None):
-    """Helper to inject game and market state into the quant agent."""
     gs = game_state or make_game_state()
     ms = market_state or make_market_state()
     quant._games[gs.game_id] = gs
     quant._markets[ms.ticker] = ms
-
-
-def _force_high_ev(quant: NBAQuantAgent):
-    """Patch _model_probability to return a value that guarantees +EV."""
-    quant._model_probability = lambda g, t: 0.95  # type: ignore[assignment]
 
 
 # ===========================================================================
@@ -43,9 +105,9 @@ def _force_high_ev(quant: NBAQuantAgent):
 class TestContextGating:
 
     @pytest.mark.asyncio
-    async def test_safe_context_publishes_signal(self, quant, mock_bus):
+    async def test_safe_context_publishes_signal(self, quant, mock_bus, stub_strategy):
         _inject_state(quant)
-        _force_high_ev(quant)
+        stub_strategy.signal_to_return = _make_high_ev_signal()
         mock_bus.get_context.return_value = (ContextStatus.SAFE, "")
 
         await quant._evaluate_all()
@@ -58,9 +120,9 @@ class TestContextGating:
         assert signal.ticker == "NBA-YES-LAL"
 
     @pytest.mark.asyncio
-    async def test_veto_context_drops_signal(self, quant, mock_bus):
+    async def test_veto_context_drops_signal(self, quant, mock_bus, stub_strategy):
         _inject_state(quant)
-        _force_high_ev(quant)
+        stub_strategy.signal_to_return = _make_high_ev_signal()
         mock_bus.get_context.return_value = (ContextStatus.VETO, "star player injured")
 
         await quant._evaluate_all()
@@ -68,10 +130,9 @@ class TestContextGating:
         mock_bus.publish.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_none_context_fail_close(self, quant, mock_bus):
-        """Missing/expired key → VETO (fail-close invariant)."""
+    async def test_none_context_fail_close(self, quant, mock_bus, stub_strategy):
         _inject_state(quant)
-        _force_high_ev(quant)
+        stub_strategy.signal_to_return = _make_high_ev_signal()
         mock_bus.get_context.return_value = (
             ContextStatus.VETO, "context missing – fail-close"
         )
@@ -82,17 +143,15 @@ class TestContextGating:
 
 
 # ===========================================================================
-# EV Threshold
+# EV Threshold (strategy returns None → no signal)
 # ===========================================================================
 
 class TestEVThreshold:
 
     @pytest.mark.asyncio
-    async def test_below_threshold_drops_signal(self, quant, mock_bus):
-        """Even with SAFE context, low EV should not publish."""
+    async def test_no_proposals_drops_signal(self, quant, mock_bus, stub_strategy):
         _inject_state(quant)
-        # Low model_prob → negative EV
-        quant._model_probability = lambda g, t: 0.10  # type: ignore[assignment]
+        stub_strategy.signal_to_return = None
         mock_bus.get_context.return_value = (ContextStatus.SAFE, "")
 
         await quant._evaluate_all()
@@ -100,10 +159,9 @@ class TestEVThreshold:
         mock_bus.publish.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_zero_ask_drops_signal(self, quant, mock_bus):
-        """Market with yes_ask=0 should be skipped."""
+    async def test_zero_ask_drops_signal(self, quant, mock_bus, stub_strategy):
         _inject_state(quant, market_state=make_market_state(yes_ask=0))
-        _force_high_ev(quant)
+        stub_strategy.signal_to_return = None
 
         await quant._evaluate_all()
 
@@ -118,12 +176,11 @@ class TestEVThreshold:
 class TestNoMapping:
 
     @pytest.mark.asyncio
-    async def test_unmapped_game_skipped(self, quant, mock_bus):
-        """Game with no matching Kalshi ticker should not produce a signal."""
+    async def test_unmapped_game_skipped(self, quant, mock_bus, stub_strategy):
         gs = make_game_state(game_id="unmapped-game")
         quant._games["unmapped-game"] = gs
         quant._markets["NFL-SPREAD-KC"] = make_market_state(ticker="NFL-SPREAD-KC")
-        _force_high_ev(quant)
+        stub_strategy.signal_to_return = _make_high_ev_signal()
 
         await quant._evaluate_all()
 
@@ -137,10 +194,9 @@ class TestNoMapping:
 class TestReallocation:
 
     @pytest.mark.asyncio
-    async def test_sufficient_bankroll_publishes_validated(self, quant, mock_bus):
-        """When bankroll can fund the trade, publish VALIDATED (no reallocation)."""
+    async def test_sufficient_bankroll_publishes_validated(self, quant, mock_bus, stub_strategy):
         _inject_state(quant)
-        _force_high_ev(quant)
+        stub_strategy.signal_to_return = _make_high_ev_signal()
         mock_bus.get_context.return_value = (ContextStatus.SAFE, "")
         quant._portfolio = make_portfolio_state(bankroll=100.0)
 
@@ -150,11 +206,9 @@ class TestReallocation:
         assert mock_bus.publish.call_args[0][0] == "signal:validated"
 
     @pytest.mark.asyncio
-    async def test_insufficient_bankroll_triggers_reallocate(self, quant, mock_bus, settings):
-        """When bankroll is too low but a resting exit clears the hurdle,
-        publish REALLOCATE with the correct target_order_id."""
+    async def test_insufficient_bankroll_triggers_reallocate(self, quant, mock_bus, settings, stub_strategy):
         _inject_state(quant)
-        _force_high_ev(quant)
+        stub_strategy.signal_to_return = _make_high_ev_signal()
         mock_bus.get_context.return_value = (ContextStatus.SAFE, "")
 
         pos = make_portfolio_position(
@@ -179,10 +233,9 @@ class TestReallocation:
         assert signal.entry_price == 95
 
     @pytest.mark.asyncio
-    async def test_bid_below_min_reallocate_skipped(self, quant, mock_bus, settings):
-        """Position with bid below MIN_REALLOCATE_BID is not considered."""
+    async def test_bid_below_min_reallocate_skipped(self, quant, mock_bus, settings, stub_strategy):
         _inject_state(quant)
-        _force_high_ev(quant)
+        stub_strategy.signal_to_return = _make_high_ev_signal()
         mock_bus.get_context.return_value = (ContextStatus.SAFE, "")
 
         pos = make_portfolio_position(
@@ -200,18 +253,28 @@ class TestReallocation:
         mock_bus.publish.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_hurdle_not_met_no_reallocate(self, quant, mock_bus, settings):
-        """When foregone profit + fees exceed projected new EV, don't reallocate.
+    async def test_hurdle_not_met_no_reallocate(self, quant, mock_bus, settings, stub_strategy):
+        """Foregone profit + fees exceed projected new EV → no reallocate.
 
-        Setup: model_prob=0.18, yes_ask=16 -> EV = 0.18*1 - 0.16 = 0.02.
-        Freed capital = 91 * 10 = 910c, new_count = floor(910*0.5/16) = 28,
-        total_new_ev = 28 * 2 = 56c.
-        Foregone = (99 - 91) * 10 = 80c, fees = 10 * 2 = 20c, cost = 100c.
-        56 < 100 -> no reallocation.
+        Signal EV=0.02, entry=16.  Freed=91*10=910c, count=floor(910*0.5/16)=28,
+        total_new_ev=28*2=56c.  Foregone=(99-91)*10=80c, fees=10*2=20c → 100c.
+        56 < 100 → no reallocation.
         """
         _inject_state(quant)
+        low_ev = Signal(
+            ticker="NBA-YES-LAL",
+            action=Action.BUY,
+            side=Side.YES,
+            status=SignalStatus.VALIDATED,
+            confidence=0.18,
+            source="stub",
+            ev_estimate=0.02,
+            entry_price=16,
+            exit_price=23,
+            game_id="game-001",
+        )
+        stub_strategy.signal_to_return = low_ev
         mock_bus.get_context.return_value = (ContextStatus.SAFE, "")
-        quant._model_probability = lambda g, t: 0.18  # type: ignore[assignment]
 
         pos = make_portfolio_position(
             ticker="NBA-YES-OTHER",
@@ -228,11 +291,9 @@ class TestReallocation:
         mock_bus.publish.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unit_math_uses_projected_count(self, quant, mock_bus, settings):
-        """Verify the hurdle rate uses freed_capital to size the new trade,
-        not raw per-contract EV."""
+    async def test_unit_math_uses_projected_count(self, quant, mock_bus, settings, stub_strategy):
         _inject_state(quant, market_state=make_market_state(yes_ask=16))
-        _force_high_ev(quant)
+        stub_strategy.signal_to_return = _make_high_ev_signal()
         mock_bus.get_context.return_value = (ContextStatus.SAFE, "")
 
         pos = make_portfolio_position(

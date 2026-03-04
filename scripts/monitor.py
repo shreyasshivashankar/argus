@@ -85,11 +85,12 @@ class ArgusMonitor:
             self.signals_seen += 1
             ev = data.get("ev_estimate", 0)
             conf = data.get("confidence", 0)
+            source = data.get("source", "?")
             self.trades.insert(0, {
                 "time": now,
                 "type": "+EV SIGNAL",
                 "ticker": data.get("ticker", "?"),
-                "details": f"EV: +${ev:.4f}  Conf: {conf:.2f}",
+                "details": f"[{source}] EV: +${ev:.4f}  Conf: {conf:.2f}",
                 "pnl": 0.0,
             })
 
@@ -224,14 +225,13 @@ class ArgusMonitor:
 
         try:
             with Live(
-                self._build_dashboard(),
                 refresh_per_second=2,
                 screen=True,
                 console=console,
             ) as live:
                 while self._running:
-                    await asyncio.sleep(0.5)
                     live.update(self._build_dashboard())
+                    await asyncio.sleep(0.5)
         finally:
             sub_task.cancel()
             await self.bus.close()

@@ -192,7 +192,11 @@ argus/
 │   └── kalshi_feed.py         # Kalshi order book + fills via WebSocket
 │
 ├── agents/
-│   ├── nba_quant.py           # EV detection and signal generation
+│   ├── nba_quant.py           # OmniQuant agent — strategy ranking, context, cooldown
+│   ├── strategies/
+│   │   ├── base.py            # BaseStrategy interface
+│   │   ├── moneyline.py       # Logistic reversal model (game-winner markets)
+│   │   └── totals.py          # Pace projection model (over/under markets)
 │   ├── narrative.py           # LLM context monitor (injury reports, momentum)
 │   ├── executor.py            # Order lifecycle, Kelly sizing, kill switch
 │   ├── paper_executor.py      # Simulated matching engine for paper mode
