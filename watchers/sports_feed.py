@@ -97,7 +97,13 @@ class SportradarFeed(SportsFeed):
             headers={"x-api-key": self._api_key},
             timeout=aiohttp.ClientTimeout(total=None, sock_read=30),
         )
-        await self._load_daily_schedule()
+        for attempt in range(6):
+            await self._load_daily_schedule()
+            if self._game_meta:
+                break
+            wait = 10 * (attempt + 1)
+            logger.warning("Schedule empty (rate limited?), retrying in {}s", wait)
+            await asyncio.sleep(wait)
         logger.info(
             "SportradarFeed connected ({} games today, access={})",
             len(self._game_meta), self._access,
@@ -138,34 +144,44 @@ class SportradarFeed(SportsFeed):
 
     async def _load_daily_schedule(self) -> None:
         assert self._session is not None
-        today = datetime.utcnow().strftime("%Y/%m/%d")
-        url = (
-            f"{_SR_BASE}/{self._access}/v8/en/"
-            f"games/{today}/schedule.json"
-        )
-        try:
-            async with self._session.get(url) as resp:
-                if resp.status != 200:
-                    logger.error("Sportradar schedule HTTP {}: {}", resp.status, await resp.text())
-                    return
-                data = await resp.json()
+        now = datetime.utcnow()
+        dates = [
+            now.strftime("%Y/%m/%d"),
+            (now - timedelta(days=1)).strftime("%Y/%m/%d"),
+        ]
+        for date_str in dates:
+            url = (
+                f"{_SR_BASE}/{self._access}/v8/en/"
+                f"games/{date_str}/schedule.json"
+            )
+            try:
+                async with self._session.get(url) as resp:
+                    if resp.status != 200:
+                        logger.error("Sportradar schedule HTTP {} for {}: {}", resp.status, date_str, await resp.text())
+                        continue
+                    data = await resp.json()
 
-            for game in data.get("games", []):
-                gid = game.get("id", "")
-                home = game.get("home", {})
-                away = game.get("away", {})
-                self._game_meta[gid] = {
-                    "home_team": home.get("name", ""),
-                    "home_market": home.get("market", ""),
-                    "home_alias": home.get("alias", ""),
-                    "away_team": away.get("name", ""),
-                    "away_market": away.get("market", ""),
-                    "away_alias": away.get("alias", ""),
-                    "status": game.get("status", ""),
-                }
-            logger.info("Loaded {} games from daily schedule", len(self._game_meta))
-        except Exception:
-            logger.exception("Failed to load daily schedule")
+                for game in data.get("games", []):
+                    gid = game.get("id", "")
+                    home = game.get("home", {})
+                    away = game.get("away", {})
+                    self._game_meta[gid] = {
+                        "home_team": home.get("name", ""),
+                        "home_market": home.get("market", ""),
+                        "home_alias": home.get("alias", ""),
+                        "away_team": away.get("name", ""),
+                        "away_market": away.get("market", ""),
+                        "away_alias": away.get("alias", ""),
+                        "status": game.get("status", ""),
+                    }
+            except Exception:
+                logger.exception("Failed to load schedule for {}", date_str)
+
+        statuses = {m["status"] for m in self._game_meta.values()}
+        logger.info(
+            "Loaded {} games from daily schedule | statuses: {}",
+            len(self._game_meta), statuses,
+        )
 
     async def _schedule_refresh_loop(self) -> None:
         while self._running:
@@ -221,10 +237,16 @@ class SportradarFeed(SportsFeed):
     async def _poll_game_summaries(self) -> AsyncIterator[GameState]:
         """Poll Game Summary for each in-progress game every 10s."""
         assert self._session is not None
+        _LIVE = {"inprogress", "halftime", "in_progress", "in progress"}
+        _SCHEDULE_REFRESH_INTERVAL = 300
+        polls_since_refresh = 0
         while self._running:
+            live_count = 0
             for gid, meta in list(self._game_meta.items()):
-                if meta.get("status") not in ("inprogress", "halftime"):
+                status = (meta.get("status") or "").lower().strip()
+                if status not in _LIVE:
                     continue
+                live_count += 1
                 url = (
                     f"{_SR_BASE}/{self._access}/v8/en/"
                     f"games/{gid}/summary.json"
@@ -244,8 +266,19 @@ class SportradarFeed(SportsFeed):
                 except Exception:
                     logger.exception("Failed to poll game summary for {}", gid)
 
-            await asyncio.sleep(10)
-            await self._load_daily_schedule()
+            if live_count == 0:
+                per_game = {m.get("home_alias", "?")+"/"+m.get("away_alias", "?"): m.get("status", "?") for m in self._game_meta.values()}
+                logger.warning("No live games to poll | per-game statuses: {}", per_game)
+                await asyncio.sleep(30)
+                await self._load_daily_schedule()
+                polls_since_refresh = 0
+            else:
+                logger.info("Polled {} live game(s) for summary", live_count)
+                await asyncio.sleep(10)
+                polls_since_refresh += 1
+                if polls_since_refresh * 10 >= _SCHEDULE_REFRESH_INTERVAL:
+                    await self._load_daily_schedule()
+                    polls_since_refresh = 0
 
     # ------------------------------------------------------------------
     # Parsers
