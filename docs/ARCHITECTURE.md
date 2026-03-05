@@ -125,16 +125,12 @@ Async `redis.asyncio` wrapper with two distinct roles:
 ### `watchers/sports_feed.py` -- Sports Data Watcher
 
 - **`SportsFeed`** -- ABC with `async connect()`, `async listen()` yielding `GameState`
-- **`SportradarFeed(SportsFeed)`** -- Production feed using Sportradar NBA Push Statistics:
-  - **Daily Schedule** REST call at startup + every 6h to discover game IDs and teams
-  - **Push Statistics** HTTP chunked-transfer stream — server pushes real-time JSON payloads with full player box scores on every stat change, heartbeats every 5s
-  - **Game Summary** REST polling fallback (10s interval) if the stream disconnects
-  - Sub-second latency, full player-level stats (pts, fgm, fga, reb, ast, etc.)
-- **`BalldontlieFeed(SportsFeed)`** -- Paper/research feed with tier-aware data fetching:
-  - **free** ($0/mo, 5 req/min): game scores only, no player stats
-  - **all-star** ($9.99/mo, 60 req/min): adds per-player box scores via `/v1/stats?game_ids[]`
-  - **goat** ($39.99/mo, 600 req/min): single-call `/v1/box_scores/live` with embedded player stats
-- Provider selected via `SPORTS_PROVIDER` setting: `"sportradar"` (live) or `"balldontlie"` (paper)
+- **`TheRundownFeed(SportsFeed)`** -- Production feed using TheRundown Ultra tier:
+  - **V1 WebSocket** (`wss://therundown.io/api/v1/ws?sport_ids=4`) — real-time event pushes with scores, `game_period`, `display_clock`, and `event_status`. WebSocket connections do NOT count against the REST rate limit, so score updates arrive instantly with zero API cost.
+  - **V2 REST player stats** (`GET /api/v2/events/{eventID}/players/stats`) — per-player box scores polled at `SPORTS_POLL_INTERVAL` (default 5s) for each live game. Rate limit budget tracked via `X-RateLimit-Remaining` headers; backs off before hitting the cap.
+  - **REST fallback** — if the WebSocket disconnects, polls events via REST with exponential backoff until reconnection.
+  - **Event bootstrap** — fetches today's NBA events on startup and every 5 minutes to discover new games and status transitions.
+  - **Team resolution** — fetches `/api/v2/sports/4/teams` once at startup to map `team_id` → abbreviation for player stats.
 
 ### `watchers/kalshi_feed.py` -- Kalshi Order Book + Fill Watcher
 
@@ -155,7 +151,7 @@ Multi-strategy portfolio manager. Subscribes to `game:state`, `market:state`, an
 - `agents/strategies/base.py` -- `BaseStrategy` ABC with `can_evaluate(market)` and `evaluate(game, market) -> Signal | None`
 - `agents/strategies/moneyline.py` -- Logistic reversal model for game-winner (GAME) tickers. Directional: resolves which team the ticker targets.
 - `agents/strategies/totals.py` -- Pace projection model for over/under (TOTAL) tickers. Projects final score from current pace, compares to Kalshi line.
-- `agents/strategies/player_props.py` -- Usage-rate projection for player points (PLAYERPTS/PTS) tickers. Calculates FGA share of team total, projects final points from live pace, and compares to the Kalshi prop line. Requires `player_stats` in `GameState` (ALL-STAR+ tier).
+- `agents/strategies/player_props.py` -- Usage-rate projection for player points (PLAYERPTS/PTS) tickers. Calculates FGA share of team total, projects final points from live pace, and compares to the Kalshi prop line. Requires `player_stats` in `GameState` (populated by TheRundown V2 REST stats).
 
 **Evaluation flow (no external async I/O in the hot path):**
 
@@ -220,7 +216,7 @@ Key behaviors:
 - Instantiates `SignalBus`, `KalshiAsyncClient`
 - Wires the `KalshiFeedWatcher`'s fill/order callbacks to the `OrderExecutor`
 - Launches all concurrently via `asyncio.gather`:
-  - `SportsFeedWatcher`
+  - `TheRundownFeed`
   - `KalshiFeedWatcher`
   - `NBAQuantAgent`
   - `NarrativeAgent` (background)
@@ -235,7 +231,7 @@ Key behaviors:
 - Limit orders only. There's no market order codepath anywhere in the system.
 - Context keys have a 5-minute TTL. If the Narrative Agent dies, keys expire and the bot stops on its own.
 - 0.65 Kelly fraction by default. Tuned for growth while preserving win rate.
-- `SportsFeed` and `LLMProvider` are interfaces. Swap Balldontlie for Sportradar, or Gemini for Claude, by writing a subclass.
+- `SportsFeed` and `LLMProvider` are interfaces. Swap TheRundown for another provider, or Gemini for Claude, by writing a subclass.
 - Strategies are pluggable too. Drop a new file in `agents/strategies/`, implement `BaseStrategy`, add it to the constructor list.
 
 ## Capital Rebalancing (Opportunity Cost Engine)

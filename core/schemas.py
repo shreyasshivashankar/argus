@@ -202,18 +202,9 @@ class AppSettings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379"
 
-    # Sports data — provider selection: "sportradar" or "balldontlie"
-    SPORTS_PROVIDER: str = "balldontlie"
-
-    # Sportradar (production)
-    SPORTRADAR_API_KEY: str = ""
-    SPORTRADAR_ACCESS_LEVEL: str = "production"  # "trial" or "production"
-
-    # Balldontlie (paper/research)
-    BALLDONTLIE_API_KEY: str = ""
-    BALLDONTLIE_TIER: str = "all-star"  # "free", "all-star", or "goat"
-
-    SPORTS_POLL_INTERVAL: float = 15.0
+    # Sports data — TheRundown (Ultra tier WebSocket + REST)
+    THERUNDOWN_API_KEY: str = ""
+    SPORTS_POLL_INTERVAL: float = 5.0
 
     # LLM — provider selection: "openai", "anthropic", or "gemini"
     LLM_PROVIDER: str = "gemini"

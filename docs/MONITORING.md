@@ -9,7 +9,7 @@ flowchart LR
     QuantAgent["NBAQuantAgent"] -->|"signal:validated"| Redis["Redis Bus"]
     Executor["OrderExecutor / PaperExecutor"] -->|"signal:executed"| Redis
     BaseAgent["All Agents"] -->|"signal:heartbeat"| Redis
-    SportsFeed["APISportsFeed"] -->|"game:state"| Redis
+    SportsFeed["TheRundownFeed"] -->|"game:state"| Redis
     KalshiFeed["KalshiFeedWatcher"] -->|"market:state"| Redis
 
     Redis -->|subscribe| Monitor["scripts/monitor.py (Rich TUI)"]

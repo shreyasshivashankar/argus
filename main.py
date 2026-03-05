@@ -27,7 +27,7 @@ from core.bus import SignalBus
 from core.client import KalshiAsyncClient
 from core.schemas import AppSettings
 from watchers.kalshi_feed import KalshiFeedWatcher
-from watchers.sports_feed import BalldontlieFeed, SportradarFeed
+from watchers.sports_feed import TheRundownFeed
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,13 +75,8 @@ async def main(
     client = KalshiAsyncClient(settings)
 
     # --- Watchers ---
-    provider = settings.SPORTS_PROVIDER.lower()
-    if provider == "sportradar" and not paper_mode:
-        sports_feed = SportradarFeed(settings, bus)
-        logger.info("Using SportradarFeed (Push Statistics streaming, production)")
-    else:
-        sports_feed = BalldontlieFeed(settings, bus)
-        logger.info("Using BalldontlieFeed (REST polling, tier={})", settings.BALLDONTLIE_TIER)
+    sports_feed = TheRundownFeed(settings, bus)
+    logger.info("Using TheRundownFeed (WebSocket + REST stats, Ultra tier)")
     kalshi_feed = KalshiFeedWatcher(client, bus)
 
     # --- Agents ---

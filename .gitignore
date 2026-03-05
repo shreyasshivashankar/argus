@@ -9,3 +9,4 @@ data/*.db-wal
 core_execution/
 core_research/
 .venv/
+keys/

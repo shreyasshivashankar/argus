@@ -43,27 +43,13 @@ GEMINI_API_KEY=AIza...          # Gemini
 OPENAI_API_KEY=sk-...           # OpenAI
 ```
 
-Sports data -- pick a provider:
+Sports data -- TheRundown (Ultra tier):
 
 ```
-SPORTS_PROVIDER=sportradar       # "sportradar" (production) or "balldontlie" (paper)
+THERUNDOWN_API_KEY=your-key-here
 ```
 
-**Sportradar (production)** -- Push Statistics streaming feed. Sub-second latency, full player box scores. Get an API key at [developer.sportradar.com](https://developer.sportradar.com/):
-
-```
-SPORTRADAR_API_KEY=your-key-here
-SPORTRADAR_ACCESS_LEVEL=production
-```
-
-**Balldontlie (paper/research)** -- REST polling. Cheaper but higher latency. Get a key at [app.balldontlie.io](https://app.balldontlie.io/):
-
-```
-BALLDONTLIE_API_KEY=your-key-here
-BALLDONTLIE_TIER=all-star        # "free" (scores only), "all-star" ($10/mo, +player stats), "goat" ($40/mo)
-```
-
-Player props require at least ALL-STAR tier (or Sportradar) for live player stats.
+Get an API key at [therundown.io/api](https://therundown.io/api). The Ultra tier provides a WebSocket feed for real-time score/clock pushes (zero rate limit cost) plus REST endpoints for live player stats. Player props require a tier that supports player game stats.
 
 ### 3. Run
 
@@ -117,7 +103,7 @@ Configure `.env` the same way as above (steps 1-2).
 
 ### Run
 
-Three flags: `--env` (demo/prod), `--paper` (simulated fills), `--track` (log trades to SQLite).
+Three flags: `--env` (demo/prod), `--paper` (simulated fills), `--track` (log trades to Postgres).
 
 ```bash
 # Paper trading on demo -- start here
@@ -206,7 +192,7 @@ argus/
 │   └── base_agent.py          # Base class for all agents
 │
 ├── watchers/
-│   ├── sports_feed.py         # Game scores + player stats (Sportradar streaming or Balldontlie REST)
+│   ├── sports_feed.py         # Game scores + player stats (TheRundown WebSocket + REST)
 │   └── kalshi_feed.py         # Kalshi order book + fills via WebSocket
 │
 ├── agents/
@@ -219,7 +205,7 @@ argus/
 │   ├── narrative.py           # LLM context monitor (injury reports, momentum)
 │   ├── executor.py            # Order lifecycle, Kelly sizing, kill switch
 │   ├── paper_executor.py      # Simulated matching engine for paper mode
-│   └── track_agent.py         # SQLite trade logger
+│   └── track_agent.py         # Postgres trade logger
 │
 ├── scripts/
 │   ├── monitor.py             # Terminal dashboard
@@ -231,7 +217,9 @@ argus/
 │   ├── test_executor.py
 │   ├── test_nba_quant.py
 │   ├── test_player_props.py
-│   └── test_client.py
+│   ├── test_client.py
+│   ├── test_reconciliation.py
+│   └── test_sports_feed.py
 │
 ├── docs/
 │   ├── ARCHITECTURE.md
