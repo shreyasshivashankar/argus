@@ -107,10 +107,13 @@ Async `redis.asyncio` wrapper with two distinct roles:
 
 ### `core/client.py` -- Kalshi Client (REST + WebSocket Auth)
 
-- `KalshiAsyncClient` wraps `kalshi-python-async` for REST: `place_order()`, `cancel_order()`, `get_positions()`, `get_balance()`
+- `KalshiAsyncClient` wraps `kalshi-python-async` for REST: `place_order()`, `cancel_order()`, `get_positions()`, `get_balance()`, `get_orders(status)`, `get_fills(order_id)`, `get_market(ticker)`
+- `get_orders(status)` -- paginated fetch of all orders filtered by status (e.g. `"resting"`), used by startup reconciliation
+- `get_fills(order_id)` -- fetch fill history for a specific order, used to reconstruct entry VWAPs on boot
 - `sign_ws_headers() -> dict` -- generates RSA-PSS auth headers for WS handshake
 - `get_ws_url() -> str` -- returns production or demo WS URL based on settings
-- Retry with exponential backoff on transient REST failures
+- Query string parameters are stripped from the signing path (Kalshi RSA-PSS signs path-only, not query string)
+- Retry with exponential backoff on transient REST failures (429, 500, 502, 503, 504)
 
 ### `core/base_agent.py` -- BaseAgent ABC
 
@@ -179,6 +182,7 @@ The executor manages the full order lifecycle. Internal state per trade:
 
 ```mermaid
 stateDiagram-v2
+  state "BOOT: reconcile with Kalshi" as Boot
   state "VALIDATED signal received" as Recv
   state "Entry PLACED" as Placed
   state "Entry RESTING" as Resting
@@ -187,7 +191,8 @@ stateDiagram-v2
   state "Exit FILLED (profit captured)" as Done
   state "CANCELED (kill switch)" as Killed
 
-  [*] --> Recv
+  [*] --> Boot
+  Boot --> Recv: state synced
   Recv --> Placed: place limit buy\n"(Kelly-sized)"
   Placed --> Resting: user_orders status=resting
   Resting --> Filled: fill event received
@@ -199,14 +204,15 @@ stateDiagram-v2
 
 Key behaviors:
 
-- Subscribes to `signal:validated` on Redis for incoming trade signals
+- **Crash-only startup reconciliation**: on every boot, `_reconcile_state_on_boot()` fetches all resting orders from Kalshi (the source of truth), reconstructs `ManagedOrder` objects with correct VWAPs from fill history, and publishes an accurate `PortfolioState` before accepting any new signals. This eliminates State Amnesia — the bot can be violently killed and restarted at any time without losing track of its positions, preventing the Bankroll Illusion (Kelly sizing on partial balance) and Double Exposure (re-buying positions already held).
+- Subscribes to `signal:validated` and `signal:reallocate` on Redis for incoming trade signals
 - Registers `on_fill` and `on_order_update` callbacks with `kalshi_feed.py`
 - **Background balance tracking**: a background async loop polls `get_balance()` every 10 seconds and stores it in `self.current_bankroll`. No REST call at execution time.
 - **Kelly sizing**: `count = floor(kelly_fraction * self.current_bankroll * edge / odds)` -- instant calculation using cached bankroll
 - **Entry**: limit buy at `entry_price + SLIPPAGE_TICKS`
 - **Exit**: only dispatched after `fill` event confirms inventory; limit sell at `entry_price + TARGET_EXIT_SPREAD`
 - **Kill switch**: tracks `daily_realized_loss`; if exceeded, cancels all resting orders, halts new trades, sends Telegram alert
-- Publishes `Signal(status=EXECUTED)` to `signal:executed` for audit trail
+- Publishes `Signal(status=EXECUTED)` to `signal:executed` for audit trail with real fill-based P&L (computed from entry/exit VWAPs, not `ev_estimate`)
 
 ### `main.py` -- Entrypoint
 
@@ -228,7 +234,7 @@ Key behaviors:
 - One Kalshi WebSocket connection handles everything: order book, fills, order status.
 - Limit orders only. There's no market order codepath anywhere in the system.
 - Context keys have a 5-minute TTL. If the Narrative Agent dies, keys expire and the bot stops on its own.
-- Half-Kelly by default. Conservative sizing so a bad night doesn't wipe you out.
+- 0.65 Kelly fraction by default. Tuned for growth while preserving win rate.
 - `SportsFeed` and `LLMProvider` are interfaces. Swap Balldontlie for Sportradar, or Gemini for Claude, by writing a subclass.
 - Strategies are pluggable too. Drop a new file in `agents/strategies/`, implement `BaseStrategy`, add it to the constructor list.
 

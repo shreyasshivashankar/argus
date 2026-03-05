@@ -82,6 +82,8 @@ def mock_client() -> AsyncMock:
     client.cancel_order = AsyncMock(return_value={})
     client.get_balance = AsyncMock(return_value=1000.0)
     client.get_positions = AsyncMock(return_value=[])
+    client.get_orders = AsyncMock(return_value=[])
+    client.get_fills = AsyncMock(return_value=[])
     client.close = AsyncMock()
     return client
 

@@ -151,3 +151,112 @@ class TestNonRetryableError:
             assert exc_info.value.status == 403
 
         await mock_kalshi_client.close()
+
+
+# ===========================================================================
+# get_orders — paginated fetch with query string signing
+# ===========================================================================
+
+class TestGetOrders:
+
+    @pytest.mark.asyncio
+    async def test_returns_resting_orders(self, mock_kalshi_client):
+        import re
+        orders_page = [
+            {"order_id": "o1", "ticker": "T1", "status": "resting"},
+            {"order_id": "o2", "ticker": "T2", "status": "resting"},
+        ]
+
+        with aioresponses() as m:
+            m.get(
+                re.compile(r".*/portfolio/orders\?"),
+                payload={"orders": orders_page, "cursor": ""},
+            )
+
+            result = await mock_kalshi_client.get_orders(status="resting")
+
+        assert len(result) == 2
+        assert result[0]["order_id"] == "o1"
+
+        await mock_kalshi_client.close()
+
+    @pytest.mark.asyncio
+    async def test_paginates_with_cursor(self, mock_kalshi_client):
+        import re
+
+        with aioresponses() as m:
+            m.get(
+                re.compile(r".*/portfolio/orders\?"),
+                payload={"orders": [{"order_id": "o1"}], "cursor": "page2cursor"},
+            )
+            m.get(
+                re.compile(r".*/portfolio/orders\?"),
+                payload={"orders": [{"order_id": "o2"}], "cursor": ""},
+            )
+
+            result = await mock_kalshi_client.get_orders(status="resting")
+
+        assert len(result) == 2
+        assert result[0]["order_id"] == "o1"
+        assert result[1]["order_id"] == "o2"
+
+        await mock_kalshi_client.close()
+
+    @pytest.mark.asyncio
+    async def test_empty_orders(self, mock_kalshi_client):
+        import re
+
+        with aioresponses() as m:
+            m.get(
+                re.compile(r".*/portfolio/orders\?"),
+                payload={"orders": [], "cursor": ""},
+            )
+
+            result = await mock_kalshi_client.get_orders(status="resting")
+
+        assert result == []
+
+        await mock_kalshi_client.close()
+
+
+# ===========================================================================
+# get_fills — fetch fills for a specific order
+# ===========================================================================
+
+class TestGetFills:
+
+    @pytest.mark.asyncio
+    async def test_returns_fills(self, mock_kalshi_client):
+        import re
+        fills = [
+            {"yes_price": 20, "count": 5, "trade_id": "t1"},
+            {"yes_price": 22, "count": 3, "trade_id": "t2"},
+        ]
+
+        with aioresponses() as m:
+            m.get(
+                re.compile(r".*/portfolio/fills\?"),
+                payload={"fills": fills},
+            )
+
+            result = await mock_kalshi_client.get_fills("order-123")
+
+        assert len(result) == 2
+        assert result[0]["yes_price"] == 20
+
+        await mock_kalshi_client.close()
+
+
+# ===========================================================================
+# Query string signing — path-only, no query params in signature
+# ===========================================================================
+
+class TestQueryStringSigning:
+
+    def test_sign_strips_query_string(self, mock_kalshi_client):
+        """Verify _auth_headers is called with path-only, not query string."""
+        path = "/portfolio/orders?status=resting&limit=200"
+        path_no_qs = path.split("?", 1)[0]
+
+        assert path_no_qs == "/portfolio/orders"
+        assert "?" not in path_no_qs

@@ -22,20 +22,23 @@ A standalone script that connects to the same Redis instance and renders a four-
 
 **Panel layout:**
 
-- **Header bar** -- Daily P&L (colored), win rate (W-L), signals seen, kill switch limit, environment (demo/prod)
+- **Header bar** -- Live Kalshi balance (polled every 30s via REST), session P&L (from real entry/exit fills), win rate (W-L), open position count, signals seen, kill switch limit, environment (demo/prod)
 - **Event feed** (left) -- scrolling table of the last 20 `signal:validated` and `signal:executed` events with time, market, details, and realized P&L
-- **Agent health** (right) -- table of each agent's last heartbeat timestamp from `signal:heartbeat`
+- **System health** (right) -- two sections:
+  - *Data feeds*: Sports Feed, Kalshi WS, and LLM/Narrative — each shows **OK** (green, <60s since last data), **STALE** (yellow, <5min), or **DOWN** (red, >5min) based on last observed message timestamp
+  - *Agent heartbeats*: `nba_quant`, `executor`, `paper_executor`, `track` — shows OK or waiting based on `signal:heartbeat`
 - **Active games** (bottom) -- game state from `game:state` with score, quarter, clock, and live SAFE/VETO context status read from Redis
 
-**Channels subscribed:** `signal:validated`, `signal:executed`, `signal:heartbeat`, `game:state`, `market:state`
+**Channels subscribed:** `signal:validated`, `signal:executed`, `signal:reallocate`, `signal:heartbeat`, `game:state`, `market:state`, `portfolio:state`
 
 **Key implementation details:**
 
 - Uses `rich.live.Live` with `refresh_per_second=2` for smooth TUI updates
-- Reads the `Signal` schema fields directly: `ev_estimate` is P&L on `EXECUTED` signals, `ev_estimate`/`confidence` for `VALIDATED` signals
+- **Real P&L**: session P&L is computed from actual fill prices `(exit_price - entry_price) / 100`, not `ev_estimate`
+- **Live balance**: a background task polls `KalshiAsyncClient.get_balance()` and `get_positions()` every 30 seconds, independent of the Redis bus. Also updates from `portfolio:state` messages when the executor publishes them
+- **Feed health tracking**: timestamps when data last arrived on `game:state` (sports), `market:state` (Kalshi WS), and `signal:heartbeat` from the `narrative` agent (LLM). Staleness thresholds: OK <60s, STALE <5min, DOWN >5min
 - Reads `game:context:{game_id}` via `bus.get_context()` for live SAFE/VETO display
-- Heartbeats come as `{"agent": name, "ts": isoformat}` from `core/base_agent.py`
-- Graceful shutdown on SIGINT/SIGTERM cleans up the Redis subscription
+- Graceful shutdown on SIGINT/SIGTERM cleans up the Redis subscription and Kalshi client
 - Runs completely independently of `main.py` -- no trading code imported, no side effects
 
 **Usage:**
@@ -88,7 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_trades_is_paper ON trades(is_paper);
 ### Write behavior
 
 - On `signal:validated`: INSERT a new row with status=VALIDATED, pnl=0, is_paper from init flag
-- On `signal:executed`: UPDATE the matching `signal_id` row to status=EXECUTED with the realized P&L, entry/exit VWAPs. If no matching row exists (edge case: tracker started after validation), INSERT directly.
+- On `signal:executed`: UPDATE the matching `signal_id` row to status=EXECUTED with real fill-based P&L computed from `(exit_price - entry_price) / 100`, not `ev_estimate`. If no matching row exists (edge case: tracker started after validation), INSERT directly.
 - Uses `aiosqlite` for async SQLite access within the asyncio event loop
 - Runs as an optional agent, wired into `main.py` with a `--track` flag
 
