@@ -91,7 +91,8 @@ class KalshiAsyncClient:
     ) -> dict:
         session = await self._ensure_session()
         url = f"{self._base_url}{path}"
-        sign_path = f"/trade-api/v2{path}"
+        path_no_qs = path.split("?", 1)[0]
+        sign_path = f"/trade-api/v2{path_no_qs}"
         headers = self._auth_headers(method, sign_path)
 
         last_exc: Optional[Exception] = None
@@ -155,6 +156,28 @@ class KalshiAsyncClient:
     async def get_balance(self) -> float:
         data = await self._request("GET", "/portfolio/balance")
         return float(data.get("balance", 0)) / 100  # cents → dollars
+
+    async def get_orders(self, status: str = "resting") -> list[dict]:
+        """Fetch orders filtered by status. Handles Kalshi cursor pagination."""
+        orders: list[dict] = []
+        cursor: str | None = None
+        while True:
+            path = f"/portfolio/orders?status={status}&limit=200"
+            if cursor:
+                path += f"&cursor={cursor}"
+            data = await self._request("GET", path)
+            orders.extend(data.get("orders", []))
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+        return orders
+
+    async def get_fills(self, order_id: str) -> list[dict]:
+        """Fetch fills for a specific order_id."""
+        data = await self._request(
+            "GET", f"/portfolio/fills?order_id={order_id}&limit=200"
+        )
+        return data.get("fills", [])
 
     async def get_market(self, ticker: str) -> dict:
         return await self._request("GET", f"/markets/{ticker}")

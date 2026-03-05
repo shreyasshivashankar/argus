@@ -64,10 +64,120 @@ class OrderExecutor(BaseAgent):
         self._kill_switch_tripped: bool = False
 
     # ------------------------------------------------------------------
+    # Startup reconciliation — crash-only architecture
+    # ------------------------------------------------------------------
+
+    async def _reconcile_state_on_boot(self) -> None:
+        """Synchronize in-memory state with Kalshi (the source of truth).
+
+        On every startup we:
+        1. Fetch the live cash balance.
+        2. Fetch all resting orders from the exchange.
+        3. For each resting order, reconstruct a ManagedOrder so that
+           fill callbacks, reallocation, and the kill switch all work
+           as if the bot had never restarted.
+        4. Publish an accurate PortfolioState so the quant agent knows
+           exactly how much capital is locked up.
+        """
+        self.log.info("Reconciling state with Kalshi...")
+
+        try:
+            self.current_bankroll = await self.client.get_balance()
+        except Exception:
+            self.log.exception("Failed to fetch balance during reconciliation")
+            return
+
+        try:
+            resting = await self.client.get_orders(status="resting")
+        except Exception:
+            self.log.exception("Failed to fetch resting orders during reconciliation")
+            return
+
+        if not resting:
+            self.log.info(
+                "No resting orders on Kalshi — clean slate (bankroll=${:.2f})",
+                self.current_bankroll,
+            )
+            return
+
+        for raw in resting:
+            kalshi_id = raw.get("order_id", "")
+            client_id = raw.get("client_order_id") or kalshi_id
+            ticker = raw.get("ticker", "")
+            action_str = raw.get("action", "buy")
+            side_str = raw.get("side", "yes")
+            yes_price = raw.get("yes_price")
+            no_price = raw.get("no_price")
+            remaining = int(raw.get("remaining_count", 0))
+            fill_count = int(raw.get("fill_count", 0))
+            initial_count = int(raw.get("initial_count", remaining + fill_count))
+
+            is_exit = action_str == "sell"
+
+            order = Order(
+                ticker=ticker,
+                action=Action(action_str),
+                side=Side(side_str),
+                count=initial_count,
+                yes_price=yes_price,
+                no_price=no_price,
+                client_order_id=client_id,
+            )
+
+            vwap = 0.0
+            if fill_count > 0:
+                try:
+                    fills = await self.client.get_fills(kalshi_id)
+                    total_cost = sum(
+                        int(f.get("yes_price", 0)) * int(f.get("count", 0))
+                        for f in fills
+                    )
+                    vwap = total_cost / fill_count if fill_count else 0.0
+                except Exception:
+                    self.log.warning(
+                        "Could not fetch fills for {} — using limit price as VWAP",
+                        kalshi_id,
+                    )
+                    vwap = float(yes_price or no_price or 0)
+
+            managed = ManagedOrder(
+                order=order,
+                state=OrderState.RESTING,
+                kalshi_order_id=kalshi_id,
+                fill_count=fill_count,
+                remaining_count=remaining,
+                signal_id="",
+                is_exit=is_exit,
+                vwap_cents=vwap,
+            )
+
+            self._orders[client_id] = managed
+            self._kalshi_to_client[kalshi_id] = client_id
+
+            label = "EXIT" if is_exit else "ENTRY"
+            price = yes_price or no_price or 0
+            self.log.info(
+                "Recovered {} order: {} {} x{} @{}c (filled={}, kalshi={})",
+                label, ticker, side_str, remaining, price, fill_count, kalshi_id,
+            )
+
+        await self._publish_portfolio()
+        self.log.info(
+            "Reconciliation complete: {} orders recovered, bankroll=${:.2f}",
+            len(self._orders), self.current_bankroll,
+        )
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
+        self.log.info("Booting Executor — synchronizing state with Kalshi")
+        await self._reconcile_state_on_boot()
+        self.log.info(
+            "State synced. {} resting orders recovered.", len(self._orders)
+        )
+
         balance_task = asyncio.create_task(self._balance_poll_loop())
         signal_task = asyncio.create_task(
             self.bus.subscribe(
