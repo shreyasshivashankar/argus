@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: argus
+      POSTGRES_PASSWORD: argus
+      POSTGRES_DB: argus
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U argus"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   redis:
     image: redis:7-alpine
     ports:
@@ -19,9 +35,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://argus:argus@postgres:5432/argus
       - KALSHI_PRIVATE_KEY_PATH=/app/keys/kalshi_private_key.pem
     volumes:
       - ./logs:/app/logs
@@ -37,9 +56,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://argus:argus@postgres:5432/argus
       - KALSHI_PRIVATE_KEY_PATH=/app/keys/kalshi_private_key.pem
     volumes:
       - ./logs:/app/logs
@@ -81,4 +103,5 @@ services:
       - test
 
 volumes:
+  pgdata:
   redis_data:

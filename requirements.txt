@@ -12,7 +12,8 @@ python-dotenv
 telegram-send
 cryptography
 rich
-aiosqlite
+asyncpg
+psycopg2-binary
 
 # Testing
 pytest>=8.0.0

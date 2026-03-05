@@ -13,7 +13,7 @@ flowchart LR
     KalshiFeed["KalshiFeedWatcher"] -->|"market:state"| Redis
 
     Redis -->|subscribe| Monitor["scripts/monitor.py (Rich TUI)"]
-    Redis -->|subscribe| Tracker["agents/track_agent.py (SQLite)"]
+    Redis -->|subscribe| Tracker["agents/track_agent.py (Postgres)"]
 ```
 
 ## Part 1: Rich Terminal Dashboard -- `scripts/monitor.py`
@@ -51,59 +51,70 @@ python -m scripts.monitor
 docker-compose run --rm argus-monitor
 ```
 
-## Part 2: SQLite Trade Tracker -- `agents/track_agent.py`
+## Part 2: Trade Tracker -- `agents/track_agent.py`
 
-A `BaseAgent` subclass that subscribes to `signal:validated` and `signal:executed`, then persists every event into a local SQLite database at `data/trades.db`.
+A `BaseAgent` subclass that subscribes to `signal:validated` and `signal:executed`, then persists every event to a PostgreSQL database.
 
 ### Paper/Live data isolation
 
-Every row includes an `is_paper` boolean column. The `TrackAgent` receives the paper mode flag at init time (passed from `main.py`'s `--paper` argument) and tags every INSERT. This prevents data pollution when switching between `--paper` and live modes against the same environment. Historical analysis queries should always filter with `WHERE is_paper = 0` (or `= 1` for paper-only review).
-
-### WAL mode
-
-On database init, the tracker executes `PRAGMA journal_mode=WAL` before creating tables. This switches SQLite from the default rollback journal to Write-Ahead Logging, which eliminates writer-reader locking and prevents thread-pool contention during trade flurries.
+Every row includes an `is_paper` boolean column. The `TrackAgent` receives the paper mode flag at init time (passed from `main.py`'s `--paper` argument) and tags every INSERT. This prevents data pollution when switching between `--paper` and live modes against the same environment. Historical analysis queries should always filter with `WHERE is_paper = FALSE` (or `= TRUE` for paper-only review).
 
 ### Schema
 
 ```sql
-PRAGMA journal_mode=WAL;
-
 CREATE TABLE IF NOT EXISTS trades (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          SERIAL PRIMARY KEY,
     signal_id   TEXT    UNIQUE,
     ticker      TEXT    NOT NULL,
     side        TEXT    NOT NULL,
     status      TEXT    NOT NULL,
-    confidence  REAL,
-    ev_estimate REAL,
+    confidence  DOUBLE PRECISION,
+    ev_estimate DOUBLE PRECISION,
     entry_price INTEGER,
     exit_price  INTEGER,
     game_id     TEXT,
     source      TEXT,
-    pnl_dollars REAL    DEFAULT 0.0,
-    is_paper    BOOLEAN NOT NULL DEFAULT 0,
-    created_at  TEXT    NOT NULL
+    pnl_dollars DOUBLE PRECISION DEFAULT 0.0,
+    is_paper    BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
 CREATE INDEX IF NOT EXISTS idx_trades_is_paper ON trades(is_paper);
+CREATE INDEX IF NOT EXISTS idx_trades_created_at ON trades(created_at);
+CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 ```
 
 ### Write behavior
 
 - On `signal:validated`: INSERT a new row with status=VALIDATED, pnl=0, is_paper from init flag
 - On `signal:executed`: UPDATE the matching `signal_id` row to status=EXECUTED with real fill-based P&L computed from `(exit_price - entry_price) / 100`, not `ev_estimate`. If no matching row exists (edge case: tracker started after validation), INSERT directly.
-- Uses `aiosqlite` for async SQLite access within the asyncio event loop
+- Uses `asyncpg` for high-performance async Postgres I/O within the asyncio event loop
 - Runs as an optional agent, wired into `main.py` with a `--track` flag
 
-**Usage:**
+### Reporting
+
+A CLI report script queries Postgres and prints lifetime stats, per-strategy breakdown, per-game breakdown, top tickers, hourly distribution, and daily P&L.
 
 ```bash
-# Enable tracking
-python main.py --env demo --paper --track
+# Quick report (via Docker)
+./report.sh
+./report.sh --paper
+./report.sh --days 7
 
-# Query results
-sqlite3 data/trades.db "SELECT * FROM trades WHERE is_paper = 0;"
+# Local (needs DATABASE_URL env var or defaults to localhost)
+python -m scripts.report
 ```
+
+### Migration from SQLite
+
+If upgrading from an older version that used SQLite (`data/trades.db`), run the one-shot migration:
+
+```bash
+docker-compose up -d postgres
+docker-compose run --rm --entrypoint "" argus python -m scripts.migrate_to_pg
+```
+
+This reads all rows from the local SQLite file and inserts them into Postgres, skipping duplicates by `signal_id`.
 
 ## Part 3: Docker configuration
 

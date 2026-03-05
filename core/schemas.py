@@ -251,3 +251,6 @@ class AppSettings(BaseSettings):
     # Capital rebalancing
     MIN_REALLOCATE_BID: int = 90
     TAKER_FEE_CENTS: float = 2.0
+
+    # Trade database (Postgres)
+    DATABASE_URL: str = "postgresql://argus:argus@localhost:5432/argus"

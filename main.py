@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--track",
         action="store_true",
-        help="Enable SQLite trade tracker (persists all trades to data/trades.db)",
+        help="Enable trade tracker (persists all trades to Postgres)",
     )
     return parser.parse_args()
 

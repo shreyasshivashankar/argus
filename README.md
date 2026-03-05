@@ -78,7 +78,7 @@ docker-compose run --rm argus-monitor
 docker-compose logs -f argus-paper
 
 # After the games, check results
-sqlite3 data/trades.db "SELECT * FROM trades WHERE is_paper = 1;"
+./report.sh --paper
 
 # Stop everything
 docker-compose down
@@ -91,7 +91,7 @@ When you're ready to go live:
 docker-compose up -d argus
 ```
 
-Trade tracking and SQLite persistence are on by default. The `data/` folder is mounted to the host so `trades.db` survives container restarts.
+Trade tracking is on by default and writes to a Postgres database (runs as a Docker service alongside Redis). Data persists in a Docker volume across container restarts and rebuilds.
 
 ## Running Locally (without Docker)
 
@@ -156,21 +156,25 @@ docker-compose run --rm argus-monitor
 
 ### Trade Tracker
 
-Pass `--track` to log every signal and fill to `data/trades.db`. Paper and live trades are tagged separately so they don't mix.
+Pass `--track` to log every signal and fill to Postgres. Paper and live trades are tagged separately so they don't mix.
+
+### P&L Report
+
+A CLI report that queries Postgres and prints lifetime stats: per-strategy, per-game, top tickers, hourly distribution, and daily P&L.
 
 ```bash
-# Live trades
-sqlite3 data/trades.db "SELECT * FROM trades WHERE is_paper = 0;"
+# All live trades, all time
+./report.sh
 
-# Paper trades
-sqlite3 data/trades.db "SELECT * FROM trades WHERE is_paper = 1;"
+# Paper trades only
+./report.sh --paper
 
-# Win rate
-sqlite3 data/trades.db "SELECT
-  COUNT(*) FILTER (WHERE pnl_dollars > 0) AS wins,
-  COUNT(*) FILTER (WHERE pnl_dollars < 0) AS losses,
-  SUM(pnl_dollars) AS total_pnl
-FROM trades WHERE status = 'EXECUTED' AND is_paper = 0;"
+# Last 7 days
+./report.sh --days 7
+
+# Without Docker
+python -m scripts.report
+python -m scripts.report --paper --days 30
 ```
 
 More details in `docs/MONITORING.md`.
@@ -218,7 +222,8 @@ argus/
 │   └── track_agent.py         # SQLite trade logger
 │
 ├── scripts/
-│   └── monitor.py             # Terminal dashboard
+│   ├── monitor.py             # Terminal dashboard
+│   └── report.py              # Lifetime P&L report
 │
 ├── tests/
 │   ├── conftest.py
@@ -232,7 +237,7 @@ argus/
 │   ├── ARCHITECTURE.md
 │   └── MONITORING.md
 │
-├── data/                      # Backtest data + trades.db
+├── data/                      # Backtest data
 └── logs/
 ```
 
