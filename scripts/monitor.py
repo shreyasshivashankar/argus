@@ -22,6 +22,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from core.bus import SignalBus
+from core.client import KalshiAsyncClient
 from core.schemas import AppSettings
 
 console = Console()
@@ -33,6 +34,7 @@ _CHANNELS = [
     "signal:heartbeat",
     "game:state",
     "market:state",
+    "portfolio:state",
 ]
 
 MAX_EVENTS = 20
@@ -43,6 +45,7 @@ class ArgusMonitor:
     def __init__(self) -> None:
         self.settings = AppSettings()  # type: ignore[call-arg]
         self.bus = SignalBus(self.settings.REDIS_URL)
+        self.client = KalshiAsyncClient(self.settings)
 
         self.trades: list[dict[str, Any]] = []
         self.total_pnl: float = 0.0
@@ -50,9 +53,14 @@ class ArgusMonitor:
         self.losses: int = 0
         self.signals_seen: int = 0
 
+        self.kalshi_balance: float | None = None
+        self.open_positions: int = 0
+
         self.heartbeats: dict[str, str] = {}
         self.games: dict[str, dict[str, Any]] = {}
         self.context_cache: dict[str, str] = {}
+
+        self.feed_ts: dict[str, datetime] = {}
 
         self._running = True
 
@@ -64,22 +72,29 @@ class ArgusMonitor:
         now = datetime.utcnow().strftime("%H:%M:%S")
 
         if channel == "signal:executed":
-            pnl = float(data.get("ev_estimate", 0.0))
+            entry = int(data.get("entry_price", 0))
+            exit_ = int(data.get("exit_price", 0))
+            pnl = (exit_ - entry) / 100.0
             self.total_pnl += pnl
-            if pnl > 0:
+            if exit_ > entry:
                 self.wins += 1
-            elif pnl < 0:
+            elif exit_ < entry:
                 self.losses += 1
             self.trades.insert(0, {
                 "time": now,
                 "type": "EXECUTED",
                 "ticker": data.get("ticker", "?"),
                 "details": (
-                    f"Entry: {data.get('entry_price', 0)}c  "
-                    f"Exit: {data.get('exit_price', 0)}c"
+                    f"Entry: {entry}c  "
+                    f"Exit: {exit_}c"
                 ),
                 "pnl": pnl,
             })
+
+        elif channel == "portfolio:state":
+            self.kalshi_balance = float(data.get("bankroll", 0))
+            self.open_positions = len(data.get("positions", []))
+            return
 
         elif channel == "signal:validated":
             self.signals_seen += 1
@@ -108,6 +123,7 @@ class ArgusMonitor:
         elif channel == "signal:heartbeat":
             agent = data.get("agent", "?")
             self.heartbeats[agent] = now
+            self.feed_ts[agent] = datetime.utcnow()
 
         elif channel == "game:state":
             gid = data.get("game_id", "")
@@ -115,6 +131,10 @@ class ArgusMonitor:
                 self.games[gid] = data
                 ctx_status, _ = await self.bus.get_context(gid)
                 self.context_cache[gid] = ctx_status.value
+            self.feed_ts["sports"] = datetime.utcnow()
+
+        elif channel == "market:state":
+            self.feed_ts["kalshi"] = datetime.utcnow()
 
         self.trades = self.trades[:MAX_EVENTS]
 
@@ -131,18 +151,25 @@ class ArgusMonitor:
         )
         layout["body"].split_row(
             Layout(name="events"),
-            Layout(name="agents", size=34),
+            Layout(name="agents", size=42),
         )
 
         # --- Header: stats bar ---
         total = self.wins + self.losses
         wr = (self.wins / total * 100) if total else 0.0
         pnl_c = "green" if self.total_pnl >= 0 else "red"
+        bal_str = (
+            f"${self.kalshi_balance:.2f}"
+            if self.kalshi_balance is not None
+            else "..."
+        )
         stats = (
-            f"[bold]P&L:[/bold] [{pnl_c}]${self.total_pnl:.2f}[/{pnl_c}]  |  "
+            f"[bold]Balance:[/bold] [cyan]{bal_str}[/cyan]  |  "
+            f"[bold]Session P&L:[/bold] [{pnl_c}]${self.total_pnl:.2f}[/{pnl_c}]  |  "
             f"[bold]Win Rate:[/bold] {wr:.1f}% ({self.wins}W-{self.losses}L)  |  "
+            f"[bold]Open:[/bold] {self.open_positions}  |  "
             f"[bold]Signals:[/bold] {self.signals_seen}  |  "
-            f"[bold]Kill Switch:[/bold] ${self.settings.DAILY_STOP_LOSS_USD:.2f}  |  "
+            f"[bold]Kill:[/bold] ${self.settings.DAILY_STOP_LOSS_USD:.2f}  |  "
             f"[bold]Env:[/bold] {self.settings.KALSHI_ENV}"
         )
         layout["header"].update(
@@ -173,17 +200,42 @@ class ArgusMonitor:
 
         layout["events"].update(Panel(ev_table, title="Event Feed"))
 
-        # --- Agent health ---
+        # --- Agent & feed health ---
         ag_table = Table(expand=True, show_edge=False)
-        ag_table.add_column("Agent", width=16)
-        ag_table.add_column("Last Seen", width=12)
+        ag_table.add_column("Component", width=16)
+        ag_table.add_column("Status", width=8)
+        ag_table.add_column("Last Update", width=12)
 
-        for agent in ("nba_quant", "narrative", "executor", "paper_executor"):
+        utcnow = datetime.utcnow()
+
+        feed_labels = [
+            ("sports", "Sports Feed"),
+            ("kalshi", "Kalshi WS"),
+            ("narrative", "LLM / Narr."),
+        ]
+        for key, label in feed_labels:
+            ts = self.feed_ts.get(key)
+            if ts is None:
+                ag_table.add_row(f"[dim]{label}[/dim]", "[dim]---[/dim]", "[dim]waiting[/dim]")
+            else:
+                age = (utcnow - ts).total_seconds()
+                ts_str = ts.strftime("%H:%M:%S")
+                if age < 60:
+                    ag_table.add_row(f"[green]{label}[/green]", "[green]OK[/green]", ts_str)
+                elif age < 300:
+                    ag_table.add_row(f"[yellow]{label}[/yellow]", "[yellow]STALE[/yellow]", ts_str)
+                else:
+                    ag_table.add_row(f"[red]{label}[/red]", "[red]DOWN[/red]", ts_str)
+
+        ag_table.add_row("", "", "")
+
+        for agent in ("nba_quant", "executor", "paper_executor", "track"):
             ts = self.heartbeats.get(agent, "---")
             color = "green" if ts != "---" else "dim"
-            ag_table.add_row(f"[{color}]{agent}[/{color}]", ts)
+            status = "[green]OK[/green]" if ts != "---" else "[dim]---[/dim]"
+            ag_table.add_row(f"[{color}]{agent}[/{color}]", status, ts)
 
-        layout["agents"].update(Panel(ag_table, title="Agent Health"))
+        layout["agents"].update(Panel(ag_table, title="System Health"))
 
         # --- Footer: active games + context ---
         gm_table = Table(expand=True, show_edge=False)
@@ -212,6 +264,19 @@ class ArgusMonitor:
     # Main loop
     # ------------------------------------------------------------------
 
+    async def _poll_balance(self) -> None:
+        """Periodically fetch live balance from Kalshi REST API."""
+        while self._running:
+            try:
+                self.kalshi_balance = await self.client.get_balance()
+                positions = await self.client.get_positions()
+                self.open_positions = len(
+                    [p for p in positions if p.get("total_traded", 0) > 0]
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(30)
+
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -220,6 +285,7 @@ class ArgusMonitor:
         sub_task = asyncio.create_task(
             self.bus.subscribe(_CHANNELS, self._on_message)
         )
+        balance_task = asyncio.create_task(self._poll_balance())
 
         try:
             with Live(
@@ -234,6 +300,8 @@ class ArgusMonitor:
                     live.update(self._build_dashboard())
         finally:
             sub_task.cancel()
+            balance_task.cancel()
+            await self.client.close()
             await self.bus.close()
 
     def _stop(self) -> None:

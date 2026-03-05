@@ -149,9 +149,9 @@ class TrackAgent(BaseAgent):
         """UPSERT: update existing VALIDATED row or insert fresh if missing."""
         assert self._db is not None
         signal_id = data.get("signal_id", "")
-        pnl = float(data.get("ev_estimate", 0.0))
-        entry_price = data.get("entry_price", 0)
-        exit_price = data.get("exit_price", 0)
+        entry_price = int(data.get("entry_price", 0))
+        exit_price = int(data.get("exit_price", 0))
+        pnl = (exit_price - entry_price) / 100.0
         now = datetime.utcnow().isoformat()
 
         try:
