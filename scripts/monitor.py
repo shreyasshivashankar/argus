@@ -123,7 +123,12 @@ class ArgusMonitor:
         elif channel == "signal:heartbeat":
             agent = data.get("agent", "?")
             self.heartbeats[agent] = now
-            self.feed_ts[agent] = datetime.utcnow()
+            ts_now = datetime.utcnow()
+            self.feed_ts[agent] = ts_now
+            if agent == "sports_feed":
+                self.feed_ts["sports"] = ts_now
+            elif agent == "narrative":
+                self.feed_ts["narrative"] = ts_now
 
         elif channel == "game:state":
             gid = data.get("game_id", "")

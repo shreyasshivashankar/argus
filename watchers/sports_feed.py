@@ -79,8 +79,9 @@ class TheRundownFeed(SportsFeed):
         connections do NOT count against the REST rate limit.
       - **Supplement (player stats)**: REST polling of
         ``GET /api/v2/events/{eventID}/players/stats`` for live player box
-        scores. Polls at ``SPORTS_POLL_INTERVAL`` (default 5s) per game,
-        staying under the tier rate limit.
+        scores. Polls at ``SPORTS_POLL_INTERVAL`` (default 30s, min 10s)
+        per game. Each call returns ~450 data points (30 players x 15 stats),
+        so aggressive polling burns the monthly quota fast.
       - **Fallback**: If the WebSocket disconnects, falls back to REST event
         polling until reconnection.
 
@@ -92,7 +93,7 @@ class TheRundownFeed(SportsFeed):
 
     WS_RECONNECT_DELAY = 3
     WS_MAX_RECONNECT_DELAY = 60
-    STATS_POLL_INTERVAL_MIN = 3.0
+    STATS_POLL_INTERVAL_MIN = 10.0
     REST_BUDGET_FLOOR = 20
 
     def __init__(self, settings: AppSettings, bus: SignalBus) -> None:
@@ -124,6 +125,12 @@ class TheRundownFeed(SportsFeed):
             self._stats_poll_interval,
         )
 
+    async def _heartbeat_loop(self) -> None:
+        """Publish periodic heartbeat so the monitor knows the feed is alive."""
+        while self._running:
+            await self.bus.publish("signal:heartbeat", {"agent": "sports_feed"})
+            await asyncio.sleep(30)
+
     async def listen(self) -> AsyncIterator[GameState]:
         assert self._session is not None
 
@@ -132,6 +139,9 @@ class TheRundownFeed(SportsFeed):
         )
         event_refresh_task = asyncio.create_task(
             self._event_refresh_loop(), name="tr_event_refresh"
+        )
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(), name="tr_heartbeat"
         )
 
         reconnect_delay = self.WS_RECONNECT_DELAY
@@ -166,7 +176,11 @@ class TheRundownFeed(SportsFeed):
 
         stats_task.cancel()
         event_refresh_task.cancel()
-        await asyncio.gather(stats_task, event_refresh_task, return_exceptions=True)
+        heartbeat_task.cancel()
+        await asyncio.gather(
+            stats_task, event_refresh_task, heartbeat_task,
+            return_exceptions=True,
+        )
 
     # ------------------------------------------------------------------
     # WebSocket stream

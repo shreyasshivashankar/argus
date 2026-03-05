@@ -204,7 +204,7 @@ class AppSettings(BaseSettings):
 
     # Sports data — TheRundown (Ultra tier WebSocket + REST)
     THERUNDOWN_API_KEY: str = ""
-    SPORTS_POLL_INTERVAL: float = 5.0
+    SPORTS_POLL_INTERVAL: float = 30.0
 
     # LLM — provider selection: "openai", "anthropic", or "gemini"
     LLM_PROVIDER: str = "gemini"
