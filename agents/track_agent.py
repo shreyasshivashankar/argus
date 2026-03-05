@@ -14,7 +14,8 @@ Key design decisions:
 """
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
@@ -88,7 +89,11 @@ class TrackAgent(BaseAgent):
 
     async def _close_db(self) -> None:
         if self._pool:
-            await self._pool.close()
+            try:
+                await asyncio.wait_for(self._pool.close(), timeout=5.0)
+            except (asyncio.TimeoutError, Exception):
+                self.log.warning("Forcibly terminating Postgres connection pool")
+                self._pool.terminate()
             self._pool = None
 
     # ------------------------------------------------------------------
@@ -116,7 +121,7 @@ class TrackAgent(BaseAgent):
 
     async def _on_validated(self, data: dict[str, Any]) -> None:
         assert self._pool is not None
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         try:
             async with self._pool.acquire() as conn:
                 await conn.execute(
@@ -149,7 +154,7 @@ class TrackAgent(BaseAgent):
         entry_price = int(data.get("entry_price", 0))
         exit_price = int(data.get("exit_price", 0))
         pnl = (exit_price - entry_price) / 100.0
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         try:
             async with self._pool.acquire() as conn:
