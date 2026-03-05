@@ -13,9 +13,18 @@ import re
 
 from agents.strategies.base import BaseStrategy
 from core.schemas import Action, GameState, MarketState, Side, Signal, SignalStatus
+from core.utils import MINUTES_PER_GAME, team_minutes_played
 
 _LINE_RE = re.compile(r"[OUT](\d+(?:\.\d+)?)", re.IGNORECASE)
-_MINUTES_PER_GAME = 48.0
+
+# Baseline std dev for game-total projection error (points).
+# NBA game totals have ~15pt standard deviation over a full game;
+# this shrinks proportionally to sqrt(fraction_remaining).
+_GAME_TOTAL_STD_DEV = 15.0
+
+# Sigmoid steepness for normal CDF approximation.
+# 1.7 gives <1% error vs true Phi(z) over [-3, 3].
+_SIGMOID_STEEPNESS = 1.7
 
 
 class TotalsStrategy(BaseStrategy):
@@ -54,13 +63,13 @@ class TotalsStrategy(BaseStrategy):
         if line is None:
             return None
 
-        minutes_played = self._minutes_played(game)
+        minutes_played = team_minutes_played(game)
         if minutes_played < self._min_minutes:
             return None
 
         current_total = game.home_score + game.away_score
         pace_per_minute = current_total / minutes_played
-        projected_final = pace_per_minute * _MINUTES_PER_GAME
+        projected_final = pace_per_minute * MINUTES_PER_GAME
 
         is_over = self._is_over_ticker(market.ticker)
         if is_over:
@@ -111,36 +120,6 @@ class TotalsStrategy(BaseStrategy):
         return True
 
     @staticmethod
-    def _minutes_played(game: GameState) -> float:
-        """Estimate minutes elapsed from quarter and clock string.
-
-        Clock formats seen from Balldontlie: ``"5:30"``, ``":08.7"``,
-        ``"Half"``, ``"END Q3"``.
-        """
-        q = max(game.quarter, 1)
-        completed_minutes = (q - 1) * 12.0
-
-        clock = game.clock.strip()
-        if not clock or clock.upper() in ("HALF", "END"):
-            return completed_minutes
-
-        # Strip leading 'Q' labels like "Q3 5:30"
-        parts = clock.split()
-        raw = parts[-1] if parts else clock
-
-        try:
-            if ":" in raw:
-                mins_str, secs_str = raw.split(":", 1)
-                mins = int(mins_str) if mins_str else 0
-                secs = float(secs_str)
-                remaining = mins + secs / 60.0
-            else:
-                remaining = float(raw) / 60.0
-            return completed_minutes + (12.0 - remaining)
-        except (ValueError, TypeError):
-            return completed_minutes
-
-    @staticmethod
     def _over_probability(
         projected: float,
         line: float,
@@ -152,13 +131,11 @@ class TotalsStrategy(BaseStrategy):
         pace to change).  The standard deviation is scaled by the
         fraction of game remaining.
         """
-        fraction_remaining = max(1.0 - minutes_played / _MINUTES_PER_GAME, 0.01)
-        std_dev = 15.0 * fraction_remaining ** 0.5
+        fraction_remaining = max(1.0 - minutes_played / MINUTES_PER_GAME, 0.01)
+        std_dev = _GAME_TOTAL_STD_DEV * fraction_remaining ** 0.5
 
         if std_dev < 0.01:
             return 1.0 if projected > line else 0.0
 
         z = (projected - line) / std_dev
-
-        # Fast sigmoid approximation of normal CDF
-        return float(1.0 / (1.0 + 2.718281828 ** (-1.7 * z)))
+        return float(1.0 / (1.0 + 2.718281828 ** (-_SIGMOID_STEEPNESS * z)))

@@ -25,10 +25,28 @@ from core.schemas import (
     Signal,
     SignalStatus,
 )
+from core.utils import MINUTES_PER_GAME, team_minutes_played
 
-_MINUTES_PER_GAME = 48.0
 _MIN_PLAYER_MINUTES = 5.0
 _MIN_TEAM_FGA = 10
+
+# Baseline std dev for individual player point totals (points).
+# Player scoring is more volatile than game totals; ~6pt over a full game
+# for a typical starter, shrinking by sqrt(fraction_remaining).
+_PLAYER_POINTS_STD_DEV = 6.0
+
+# Sigmoid steepness for normal CDF approximation.
+# 1.7 gives <1% error vs true Phi(z) over [-3, 3].
+_SIGMOID_STEEPNESS = 1.7
+
+# Expected starter minutes per game (used for remaining-minutes projection).
+_STARTER_MINUTES_PER_GAME = 36.0
+
+# Baseline usage rate; deviations scale the usage boost factor.
+_BASELINE_USAGE_RATE = 0.20
+_USAGE_BOOST_SCALE = 0.5
+_USAGE_BOOST_MIN = 0.7
+_USAGE_BOOST_MAX = 1.5
 
 _LINE_RE = re.compile(r"[OU](\d+(?:\.\d+)?)", re.IGNORECASE)
 
@@ -81,7 +99,7 @@ class PlayerPropStrategy(BaseStrategy):
             return None
 
         is_over = self._is_over_ticker(market.ticker)
-        minutes_played = self._team_minutes_played(game)
+        minutes_played = team_minutes_played(game)
         if is_over:
             model_prob = self._over_probability(projected_pts, line, minutes_played)
         else:
@@ -184,15 +202,14 @@ class PlayerPropStrategy(BaseStrategy):
 
         pts_per_minute = player.pts / player.minutes
 
-        team_minutes = _team_minutes_from_quarter(game)
-        fraction_played = min(team_minutes / _MINUTES_PER_GAME, 1.0) if team_minutes > 0 else 0.0
+        team_minutes = team_minutes_played(game)
+        fraction_played = min(team_minutes / MINUTES_PER_GAME, 1.0) if team_minutes > 0 else 0.0
         fraction_remaining = max(1.0 - fraction_played, 0.0)
 
-        starter_minutes_total = 36.0
-        remaining_player_minutes = starter_minutes_total * fraction_remaining
+        remaining_player_minutes = _STARTER_MINUTES_PER_GAME * fraction_remaining
 
-        usage_boost = 1.0 + (usage_rate - 0.20) * 0.5
-        usage_boost = max(min(usage_boost, 1.5), 0.7)
+        usage_boost = 1.0 + (usage_rate - _BASELINE_USAGE_RATE) * _USAGE_BOOST_SCALE
+        usage_boost = max(min(usage_boost, _USAGE_BOOST_MAX), _USAGE_BOOST_MIN)
 
         projected = player.pts + (pts_per_minute * remaining_player_minutes * usage_boost)
         return projected
@@ -212,14 +229,14 @@ class PlayerPropStrategy(BaseStrategy):
         Player-level variance is higher than game totals, so we use a
         wider standard deviation that shrinks as the game progresses.
         """
-        fraction_remaining = max(1.0 - minutes_played / _MINUTES_PER_GAME, 0.01)
-        std_dev = 6.0 * fraction_remaining ** 0.5
+        fraction_remaining = max(1.0 - minutes_played / MINUTES_PER_GAME, 0.01)
+        std_dev = _PLAYER_POINTS_STD_DEV * fraction_remaining ** 0.5
 
         if std_dev < 0.01:
             return 1.0 if projected > line else 0.0
 
         z = (projected - line) / std_dev
-        return float(1.0 / (1.0 + 2.718281828 ** (-1.7 * z)))
+        return float(1.0 / (1.0 + 2.718281828 ** (-_SIGMOID_STEEPNESS * z)))
 
     # ------------------------------------------------------------------
     # Helpers
@@ -239,50 +256,3 @@ class PlayerPropStrategy(BaseStrategy):
             return False
         return True
 
-    @staticmethod
-    def _team_minutes_played(game: GameState) -> float:
-        """Team-level minutes elapsed (same as TotalsStrategy)."""
-        q = max(game.quarter, 1)
-        completed = (q - 1) * 12.0
-
-        clock = game.clock.strip()
-        if not clock or clock.upper() in ("HALF", "END"):
-            return completed
-
-        parts = clock.split()
-        raw = parts[-1] if parts else clock
-        try:
-            if ":" in raw:
-                mins_str, secs_str = raw.split(":", 1)
-                mins = int(mins_str) if mins_str else 0
-                secs = float(secs_str)
-                remaining = mins + secs / 60.0
-            else:
-                remaining = float(raw) / 60.0
-            return completed + (12.0 - remaining)
-        except (ValueError, TypeError):
-            return completed
-
-
-def _team_minutes_from_quarter(game: GameState) -> float:
-    """Estimate total team minutes elapsed."""
-    q = max(game.quarter, 1)
-    completed = (q - 1) * 12.0
-
-    clock = game.clock.strip()
-    if not clock or clock.upper() in ("HALF", "END"):
-        return completed
-
-    parts = clock.split()
-    raw = parts[-1] if parts else clock
-    try:
-        if ":" in raw:
-            mins_str, secs_str = raw.split(":", 1)
-            mins = int(mins_str) if mins_str else 0
-            secs = float(secs_str)
-            remaining = mins + secs / 60.0
-        else:
-            remaining = float(raw) / 60.0
-        return completed + (12.0 - remaining)
-    except (ValueError, TypeError):
-        return completed

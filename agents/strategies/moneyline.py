@@ -12,6 +12,17 @@ from agents.strategies.base import BaseStrategy
 from core.schemas import Action, GameState, MarketState, Side, Signal, SignalStatus
 
 
+# Logistic model coefficients for live win probability.
+# Each additional quarter increases the weight of the current
+# score differential (late leads are harder to overcome).
+_QUARTER_WEIGHT_INCREMENT = 0.3
+
+# Slope of the logistic curve per point of score differential.
+# Derived from NBA historical comeback data: ~0.15 per point
+# gives realistic reversal probabilities at each quarter.
+_LOGISTIC_SLOPE_PER_POINT = 0.15
+
+
 class MoneylineStrategy(BaseStrategy):
     name = "moneyline"
 
@@ -83,6 +94,6 @@ class MoneylineStrategy(BaseStrategy):
     @staticmethod
     def _logistic_estimate(score_diff: int, quarter: int) -> float:
         """Logistic P(home wins) given away-home score diff and quarter."""
-        quarter_weight = 1.0 + (quarter - 1) * 0.3
-        z = -0.15 * score_diff * quarter_weight
+        quarter_weight = 1.0 + (quarter - 1) * _QUARTER_WEIGHT_INCREMENT
+        z = -_LOGISTIC_SLOPE_PER_POINT * score_diff * quarter_weight
         return float(1.0 / (1.0 + np.exp(-z)))

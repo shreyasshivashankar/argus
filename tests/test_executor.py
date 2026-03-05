@@ -342,8 +342,8 @@ class TestReallocate:
 
     @pytest.mark.asyncio
     async def test_reallocate_cancels_and_places_aggressive_sell(self, executor):
-        """REALLOCATE should cancel the targeted resting exit, sleep, then
-        place an aggressive limit sell at the bid price."""
+        """REALLOCATE should cancel the targeted resting exit, wait for WS
+        cancel confirmation, then place an aggressive limit sell."""
         exit_order = make_order(
             action=Action.SELL, count=50, yes_price=25, client_order_id="exit-target"
         )
@@ -364,9 +364,18 @@ class TestReallocate:
         signal_data = signal.model_dump(mode="json")
         signal_data["target_order_id"] = "exit-target"
 
-        with patch("agents.executor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            await executor._on_signal("signal:reallocate", signal_data)
-            mock_sleep.assert_called_once_with(0.5)
+        async def _simulate_cancel_confirm(*args, **kwargs):
+            """After cancel_order REST call, simulate the WS confirmation."""
+            await executor.on_order_update({
+                "order_id": "kalshi-exit-target",
+                "client_order_id": "exit-target",
+                "status": "canceled",
+            })
+            return {}
+
+        executor.client.cancel_order = AsyncMock(side_effect=_simulate_cancel_confirm)
+
+        await executor._on_signal("signal:reallocate", signal_data)
 
         executor.client.cancel_order.assert_called_once_with("kalshi-exit-target")
         assert exit_managed.state == OrderState.CANCELED
@@ -407,8 +416,17 @@ class TestReallocate:
         signal_data = signal.model_dump(mode="json")
         signal_data["target_order_id"] = "exit-B"
 
-        with patch("agents.executor.asyncio.sleep", new_callable=AsyncMock):
-            await executor._on_signal("signal:reallocate", signal_data)
+        async def _simulate_cancel_confirm(*args, **kwargs):
+            await executor.on_order_update({
+                "order_id": "kalshi-exit-B",
+                "client_order_id": "exit-B",
+                "status": "canceled",
+            })
+            return {}
+
+        executor.client.cancel_order = AsyncMock(side_effect=_simulate_cancel_confirm)
+
+        await executor._on_signal("signal:reallocate", signal_data)
 
         executor.client.cancel_order.assert_called_once_with("kalshi-exit-B")
         assert executor._orders["exit-A"].state == OrderState.RESTING

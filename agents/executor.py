@@ -59,6 +59,11 @@ class OrderExecutor(BaseAgent):
         # Keyed by kalshi_order_id so they can be replayed once the mapping exists.
         self._deferred_fills: list[dict[str, Any]] = []
 
+        # Cancel confirmation events: on_order_update sets these when
+        # Kalshi WS confirms a cancel, so _execute_reallocate can wait
+        # deterministically instead of a blind sleep.
+        self._cancel_events: dict[str, asyncio.Event] = {}
+
         # Daily P&L tracking
         self._daily_realized_pnl: float = 0.0
         self._kill_switch_tripped: bool = False
@@ -331,19 +336,31 @@ class OrderExecutor(BaseAgent):
             self.log.warning("REALLOCATE: target {} is not a resting exit", target_id)
             return
 
+        cancel_event = asyncio.Event()
+        self._cancel_events[managed.kalshi_order_id] = cancel_event
+
         try:
             await self.client.cancel_order(managed.kalshi_order_id)
-            managed.state = OrderState.CANCELED
             self.log.info(
-                "REALLOCATE: canceled resting exit {} (kalshi={})",
+                "REALLOCATE: cancel sent for {} (kalshi={}), awaiting WS confirm",
                 target_id, managed.kalshi_order_id,
             )
         except Exception:
+            self._cancel_events.pop(managed.kalshi_order_id, None)
             self.log.exception("REALLOCATE: failed to cancel {}", managed.kalshi_order_id)
             return
 
-        # P2 fix: let the exchange release inventory before placing the new sell
-        await asyncio.sleep(0.5)
+        try:
+            await asyncio.wait_for(cancel_event.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            self.log.warning(
+                "REALLOCATE: cancel confirm timed out for {} — proceeding anyway",
+                managed.kalshi_order_id,
+            )
+        finally:
+            self._cancel_events.pop(managed.kalshi_order_id, None)
+
+        managed.state = OrderState.CANCELED
 
         aggressive_price = signal.entry_price
         sell_order = Order(
@@ -460,7 +477,11 @@ class OrderExecutor(BaseAgent):
             managed.state = OrderState.RESTING
         elif status == "canceled":
             managed.state = OrderState.CANCELED
-            self.log.warning("Order canceled by exchange: {}", order_id)
+            cancel_ev = self._cancel_events.get(order_id)
+            if cancel_ev:
+                cancel_ev.set()
+            else:
+                self.log.warning("Order canceled by exchange: {}", order_id)
 
     # ------------------------------------------------------------------
     # Exit order (only after fill confirms inventory)
