@@ -436,16 +436,16 @@ _LIVE_STATUSES = frozenset({
 class BalldontlieFeed(SportsFeed):
     """REST polling feed from Balldontlie (api.balldontlie.io).
 
-    Suitable for paper trading and research. Polls today's games and only
-    emits live in-progress games.
+    Polls today's games and emits live in-progress games.
 
     Tier support:
       - free: game scores only (5 req/min)
       - all-star: adds per-player stats via /v1/stats ($9.99/mo, 60 req/min)
-      - goat: adds live box scores, odds, player props ($39.99/mo, 600 req/min)
+      - goat: adds live box scores via /box_scores/live ($39.99/mo, 600 req/min)
 
-    Do NOT use for live trading — REST polling adds unacceptable latency
-    compared to a WebSocket feed like Sportradar.
+    At GOAT tier with SPORTS_POLL_INTERVAL=1.0, effective latency is ~1s.
+    The single /box_scores/live call returns all games with embedded player
+    stats, so even with 10 simultaneous games it stays at 60 req/min.
     """
 
     _BASE_URL = "https://api.balldontlie.io/v1"
