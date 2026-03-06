@@ -258,8 +258,13 @@ class OrderExecutor(BaseAgent):
                             exit_managed.order.ticker, kalshi_id,
                         )
                     except Exception:
-                        self.log.exception("Exit retry failed for {}", exit_managed.order.ticker)
-                        self._failed_exits.append(exit_managed)
+                        retries = getattr(exit_managed, "_retry_count", 0)
+                        if retries < 10:
+                            exit_managed._retry_count = retries + 1
+                            self.log.warning("Exit retry {}/10 failed for {}", retries + 1, exit_managed.order.ticker)
+                            self._failed_exits.append(exit_managed)
+                        else:
+                            self.log.error("Dropping failed exit for {} after 10 retries", exit_managed.order.ticker)
 
             now = datetime.utcnow()
             stale = [
@@ -631,7 +636,7 @@ class OrderExecutor(BaseAgent):
 
     async def _cancel_all_resting(self) -> None:
         for managed in self._orders.values():
-            if managed.state in (OrderState.PLACED, OrderState.RESTING):
+            if managed.state in (OrderState.PLACED, OrderState.RESTING, OrderState.PARTIALLY_FILLED):
                 if managed.kalshi_order_id:
                     try:
                         await self.client.cancel_order(managed.kalshi_order_id)
@@ -647,7 +652,7 @@ class OrderExecutor(BaseAgent):
         """
         exits_left = 0
         for managed in self._orders.values():
-            if managed.state not in (OrderState.PLACED, OrderState.RESTING):
+            if managed.state not in (OrderState.PLACED, OrderState.RESTING, OrderState.PARTIALLY_FILLED):
                 continue
             if managed.is_exit:
                 exits_left += 1
