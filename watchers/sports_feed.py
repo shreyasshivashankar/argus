@@ -202,6 +202,12 @@ class TheRundownFeed(SportsFeed):
             receive_timeout=45,
         ) as ws:
             logger.info("TheRundown WebSocket connected")
+            # Yield any live events from cache immediately (WS may not push until score changes)
+            for eid, ev in list(self._event_cache.items()):
+                if ev.get("score", {}).get("event_status") in _LIVE_STATUSES:
+                    gs = self._event_to_game_state(ev, eid)
+                    if gs:
+                        yield gs
             async for msg in ws:
                 if not self._running:
                     break
