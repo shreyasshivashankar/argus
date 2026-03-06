@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
@@ -281,6 +281,7 @@ class NarrativeAgent(BaseAgent):
     async def _context_loop(self) -> None:
         """Periodically query the LLM for each active game and update the cache."""
         while self._running:
+            self._evict_stale_games()
             if self._active_games:
                 self.log.info(
                     "Evaluating context for {} active game(s)",
@@ -292,6 +293,28 @@ class NarrativeAgent(BaseAgent):
             ]
             await asyncio.gather(*tasks)
             await asyncio.sleep(self.settings.CONTEXT_POLL_INTERVAL)
+
+    _STALE_GAME_SECONDS = 600  # 10 minutes with no update → game is over
+
+    def _evict_stale_games(self) -> None:
+        now = datetime.now(timezone.utc)
+        stale = []
+        for gid, g in self._active_games.items():
+            ts = g.get("timestamp")
+            if ts is None:
+                continue
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts)
+                except ValueError:
+                    continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if (now - ts).total_seconds() > self._STALE_GAME_SECONDS:
+                stale.append(gid)
+        for gid in stale:
+            del self._active_games[gid]
+            self.log.info("Evicted stale game {} (no update in 10min)", gid)
 
     # ------------------------------------------------------------------
     # LLM evaluation

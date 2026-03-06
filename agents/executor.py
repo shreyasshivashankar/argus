@@ -64,6 +64,9 @@ class OrderExecutor(BaseAgent):
         # deterministically instead of a blind sleep.
         self._cancel_events: dict[str, asyncio.Event] = {}
 
+        # Failed exit orders queued for retry
+        self._failed_exits: list[ManagedOrder] = []
+
         # Daily P&L tracking
         self._daily_realized_pnl: float = 0.0
         self._kill_switch_tripped: bool = False
@@ -235,10 +238,29 @@ class OrderExecutor(BaseAgent):
     # ------------------------------------------------------------------
 
     async def _gc_loop(self) -> None:
-        """Periodically evict terminal orders older than ORDER_GC_TTL seconds."""
+        """Periodically evict terminal orders and retry failed exits."""
         terminal_states = {OrderState.FILLED, OrderState.CANCELED}
         while self._running:
             await asyncio.sleep(self.settings.ORDER_GC_INTERVAL)
+
+            if self._failed_exits:
+                pending = self._failed_exits[:]
+                self._failed_exits.clear()
+                for exit_managed in pending:
+                    self.log.info("Retrying exit order for {}", exit_managed.order.ticker)
+                    try:
+                        resp = await self.client.place_order(exit_managed.order)
+                        kalshi_id = resp.get("order", {}).get("order_id", "")
+                        exit_managed.kalshi_order_id = kalshi_id
+                        self._kalshi_to_client[kalshi_id] = exit_managed.order.client_order_id
+                        self.log.info(
+                            "Exit retry succeeded: {} (kalshi={})",
+                            exit_managed.order.ticker, kalshi_id,
+                        )
+                    except Exception:
+                        self.log.exception("Exit retry failed for {}", exit_managed.order.ticker)
+                        self._failed_exits.append(exit_managed)
+
             now = datetime.utcnow()
             stale = [
                 cid for cid, m in self._orders.items()
@@ -536,7 +558,8 @@ class OrderExecutor(BaseAgent):
                 exit_order.ticker, batch_count, exit_price, kalshi_id,
             )
         except Exception:
-            self.log.exception("Failed to place exit for {}", exit_order.ticker)
+            self.log.exception("Failed to place exit for {} — queueing for retry", exit_order.ticker)
+            self._failed_exits.append(exit_managed)
 
         await self._replay_deferred_fills()
 
@@ -561,7 +584,8 @@ class OrderExecutor(BaseAgent):
         pnl_dollars = pnl_cents / 100.0
         self._daily_realized_pnl += pnl_dollars
 
-        revenue_dollars = (fill_price * batch_count) / 100.0
+        actual_exit_price = fill_price if exit_managed.order.side == Side.YES else (100 - fill_price)
+        revenue_dollars = (actual_exit_price * batch_count) / 100.0
         self.current_bankroll += revenue_dollars
 
         self.log.info(
