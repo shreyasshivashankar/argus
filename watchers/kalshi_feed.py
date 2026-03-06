@@ -52,6 +52,9 @@ class KalshiFeedWatcher:
         self._fill_callbacks: list[OnFillCallback] = []
         self._order_callbacks: list[OnOrderCallback] = []
 
+        # Strong refs to fire-and-forget callback tasks (prevents GC mid-flight)
+        self._bg_tasks: set[asyncio.Task] = set()
+
     # ------------------------------------------------------------------
     # Callback registration
     # ------------------------------------------------------------------
@@ -233,15 +236,21 @@ class KalshiFeedWatcher:
     async def _handle_fill(self, msg: dict) -> None:
         logger.info("Fill event: order={} ticker={} count={}", msg.get("order_id"), msg.get("market_ticker"), msg.get("count"))
         for cb in self._fill_callbacks:
-            try:
-                await cb(msg)
-            except Exception:
-                logger.exception("Fill callback error")
+            task = asyncio.create_task(cb(msg))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._task_done)
 
     async def _handle_order_update(self, msg: dict) -> None:
         logger.debug("Order update: {} status={}", msg.get("order_id"), msg.get("status"))
         for cb in self._order_callbacks:
-            try:
-                await cb(msg)
-            except Exception:
-                logger.exception("Order callback error")
+            task = asyncio.create_task(cb(msg))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._task_done)
+
+    def _task_done(self, task: asyncio.Task) -> None:
+        self._bg_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.exception("Callback error: {}", exc, exc_info=exc)

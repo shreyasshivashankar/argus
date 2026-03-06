@@ -211,6 +211,8 @@ class NBAQuantAgent(BaseAgent):
             signal.ev_estimate, entry_price_cents,
             signal.confidence, self._markets[signal.ticker], game,
         )
+        if reallocated:
+            self._signal_cooldowns[signal.ticker] = now
         return reallocated
 
     # ------------------------------------------------------------------

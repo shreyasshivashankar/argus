@@ -54,6 +54,8 @@ class SignalBus:
         await pubsub.subscribe(*channels)
         logger.info("Subscribed to channels: {}", channels)
 
+        background_tasks: set[asyncio.Task] = set()
+
         try:
             async for raw_message in pubsub.listen():
                 if raw_message["type"] != "message":
@@ -64,7 +66,9 @@ class SignalBus:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Malformed message on {}: {}", channel, raw_message["data"])
                     continue
-                await callback(channel, data)
+                task = asyncio.create_task(callback(channel, data))
+                background_tasks.add(task)
+                task.add_done_callback(background_tasks.discard)
         finally:
             await pubsub.unsubscribe(*channels)
             await pubsub.close()
