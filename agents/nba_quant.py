@@ -251,7 +251,7 @@ class NBAQuantAgent(BaseAgent):
 
             freed_capital_cents = live_bid * pos.remaining_count
             expected_new_count = math.floor(
-                freed_capital_cents * self.settings.KELLY_FRACTION / new_entry_price
+                freed_capital_cents / new_entry_price
             ) if new_entry_price > 0 else 0
             if expected_new_count < 1:
                 continue

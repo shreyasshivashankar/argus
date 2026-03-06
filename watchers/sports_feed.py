@@ -166,12 +166,6 @@ class BallDontLieFeed(SportsFeed):
             ]
             if live_ids:
                 await self._fetch_stats(live_ids)
-                for gid in live_ids:
-                    g = self._games_cache.get(gid)
-                    if g:
-                        gs = self._game_to_state(g, gid)
-                        if gs:
-                            await self._queue.put(gs)
             await asyncio.sleep(self._stats_poll_interval)
 
     async def _fetch_stats(self, game_ids: list[str]) -> None:

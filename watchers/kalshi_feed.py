@@ -84,6 +84,7 @@ class KalshiFeedWatcher:
 
         async with websockets.connect(ws_url, additional_headers=headers) as ws:
             self._ws = ws
+            self._orderbooks.clear()
             logger.info("Connected to Kalshi WebSocket: {}", ws_url)
             await self._subscribe_all()
 

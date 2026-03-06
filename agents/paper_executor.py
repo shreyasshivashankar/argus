@@ -210,6 +210,7 @@ class PaperExecutor(BaseAgent):
             return
         if abs(self._daily_realized_pnl) >= self.settings.DAILY_STOP_LOSS_USD:
             self._kill_switch_tripped = True
+            self._resting_exits.clear()
             self.log.critical(
                 "[PAPER] KILL SWITCH: daily loss ${:.2f} exceeds limit ${:.2f}",
                 abs(self._daily_realized_pnl),
