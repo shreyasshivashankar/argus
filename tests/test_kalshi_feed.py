@@ -27,56 +27,52 @@ def watcher():
 # ===========================================================================
 
 class TestApplyDelta:
-    """Kalshi deltas are absolute: quantity=0 removes, quantity>0 sets."""
+    """Kalshi deltas are absolute: quantity=0 removes, quantity>0 sets. Dict-based O(1)."""
 
     def test_add_new_level(self):
-        book: list[list[int]] = []
-        KalshiFeedWatcher._apply_delta(book, 50, 100, ascending=True)
-        assert book == [[50, 100]]
+        book: dict[int, int] = {}
+        KalshiFeedWatcher._apply_delta(book, 50, 100)
+        assert book == {50: 100}
 
     def test_set_existing_level_absolute(self):
         """Quantity replaces, not adds."""
-        book: list[list[int]] = [[50, 100]]
-        KalshiFeedWatcher._apply_delta(book, 50, 200, ascending=True)
-        assert book == [[50, 200]]
+        book: dict[int, int] = {50: 100}
+        KalshiFeedWatcher._apply_delta(book, 50, 200)
+        assert book == {50: 200}
 
     def test_remove_level_quantity_zero(self):
-        book: list[list[int]] = [[40, 50], [50, 100], [60, 75]]
-        KalshiFeedWatcher._apply_delta(book, 50, 0, ascending=True)
-        assert book == [[40, 50], [60, 75]]
+        book: dict[int, int] = {40: 50, 50: 100, 60: 75}
+        KalshiFeedWatcher._apply_delta(book, 50, 0)
+        assert book == {40: 50, 60: 75}
 
     def test_remove_nonexistent_level_noop(self):
-        book: list[list[int]] = [[50, 100]]
-        KalshiFeedWatcher._apply_delta(book, 99, 0, ascending=True)
-        assert book == [[50, 100]]
+        book: dict[int, int] = {50: 100}
+        KalshiFeedWatcher._apply_delta(book, 99, 0)
+        assert book == {50: 100}
 
     def test_add_zero_quantity_noop(self):
         """Adding a level with quantity 0 should not insert anything."""
-        book: list[list[int]] = []
-        KalshiFeedWatcher._apply_delta(book, 50, 0, ascending=True)
-        assert book == []
+        book: dict[int, int] = {}
+        KalshiFeedWatcher._apply_delta(book, 50, 0)
+        assert book == {}
 
-    @pytest.mark.parametrize(
-        "ascending, expected_prices",
-        [
-            (True, [10, 20, 50]),   # asks: ascending
-            (False, [50, 20, 10]),  # bids: descending
-        ],
-    )
-    def test_sort_invariant(self, ascending, expected_prices):
-        book: list[list[int]] = []
+    def test_multiple_levels_dict(self):
+        """Dict stores all levels; best bid/ask via max/min."""
+        book: dict[int, int] = {}
         for price in [50, 10, 20]:
-            KalshiFeedWatcher._apply_delta(book, price, 100, ascending=ascending)
-        assert [lvl[0] for lvl in book] == expected_prices
+            KalshiFeedWatcher._apply_delta(book, price, 100)
+        assert book == {50: 100, 10: 100, 20: 100}
+        assert max(book) == 50
+        assert min(book) == 10
 
     def test_multiple_updates_sequence(self):
         """Simulate a realistic delta sequence."""
-        book: list[list[int]] = []
-        KalshiFeedWatcher._apply_delta(book, 30, 150, ascending=True)
-        KalshiFeedWatcher._apply_delta(book, 40, 200, ascending=True)
-        KalshiFeedWatcher._apply_delta(book, 30, 50, ascending=True)  # update, not add
-        KalshiFeedWatcher._apply_delta(book, 40, 0, ascending=True)   # remove
-        assert book == [[30, 50]]
+        book: dict[int, int] = {}
+        KalshiFeedWatcher._apply_delta(book, 30, 150)
+        KalshiFeedWatcher._apply_delta(book, 40, 200)
+        KalshiFeedWatcher._apply_delta(book, 30, 50)  # update, not add
+        KalshiFeedWatcher._apply_delta(book, 40, 0)   # remove
+        assert book == {30: 50}
 
 
 # ===========================================================================
@@ -93,19 +89,19 @@ class TestHandleOBSnapshot:
         }
         watcher._handle_ob_snapshot(msg)
         ob = watcher._orderbooks["NBA-YES-LAL"]
-        assert ob["bids"] == [[50, 100], [45, 200]]
-        assert ob["asks"] == [[55, 80], [60, 120]]
+        assert ob["bids"] == {50: 100, 45: 200}
+        assert ob["asks"] == {55: 80, 60: 120}
 
-    def test_snapshot_sorts_correctly(self, watcher):
+    def test_snapshot_best_bid_ask_via_max_min(self, watcher):
         msg = {
             "market_ticker": "T1",
-            "bids": [[10, 50], [30, 50], [20, 50]],  # unsorted
-            "asks": [[60, 50], [40, 50], [50, 50]],   # unsorted
+            "bids": [[10, 50], [30, 50], [20, 50]],
+            "asks": [[60, 50], [40, 50], [50, 50]],
         }
         watcher._handle_ob_snapshot(msg)
         ob = watcher._orderbooks["T1"]
-        assert [lvl[0] for lvl in ob["bids"]] == [30, 20, 10]  # descending
-        assert [lvl[0] for lvl in ob["asks"]] == [40, 50, 60]  # ascending
+        assert max(ob["bids"]) == 30
+        assert min(ob["asks"]) == 40
 
 
 # ===========================================================================
@@ -117,8 +113,8 @@ class TestHandleOBDelta:
     @pytest.mark.asyncio
     async def test_delta_publishes_market_state(self, watcher):
         watcher._orderbooks["NBA-YES-LAL"] = {
-            "bids": [[50, 100]],
-            "asks": [[55, 80]],
+            "bids": {50: 100},
+            "asks": {55: 80},
         }
         msg = {
             "market_ticker": "NBA-YES-LAL",
@@ -131,38 +127,37 @@ class TestHandleOBDelta:
         assert call_args[0][0] == "market:state"
         market = call_args[0][1]
         assert market.ticker == "NBA-YES-LAL"
-        # Best bid is the highest: 50 (existing, sorted descending)
         assert market.yes_bid == 50
 
     @pytest.mark.asyncio
     async def test_delta_removes_level(self, watcher):
         watcher._orderbooks["T1"] = {
-            "bids": [[50, 100], [45, 200]],
-            "asks": [[55, 80]],
+            "bids": {50: 100, 45: 200},
+            "asks": {55: 80},
         }
         msg = {
             "market_ticker": "T1",
-            "bids": [[50, 0]],   # remove this level
+            "bids": [[50, 0]],
             "asks": [],
         }
         await watcher._handle_ob_delta(msg)
-        assert watcher._orderbooks["T1"]["bids"] == [[45, 200]]
+        assert watcher._orderbooks["T1"]["bids"] == {45: 200}
 
     @pytest.mark.asyncio
     async def test_delta_batch_updates(self, watcher):
         """Multiple bid and ask updates in a single delta message."""
         watcher._orderbooks["T2"] = {
-            "bids": [[50, 100]],
-            "asks": [[55, 80]],
+            "bids": {50: 100},
+            "asks": {55: 80},
         }
         msg = {
             "market_ticker": "T2",
-            "bids": [[48, 150], [50, 0]],     # add 48, remove 50
-            "asks": [[55, 200], [60, 100]],    # update 55, add 60
+            "bids": [[48, 150], [50, 0]],
+            "asks": [[55, 200], [60, 100]],
         }
         await watcher._handle_ob_delta(msg)
-        assert watcher._orderbooks["T2"]["bids"] == [[48, 150]]
-        assert watcher._orderbooks["T2"]["asks"] == [[55, 200], [60, 100]]
+        assert watcher._orderbooks["T2"]["bids"] == {48: 150}
+        assert watcher._orderbooks["T2"]["asks"] == {55: 200, 60: 100}
 
     @pytest.mark.asyncio
     async def test_delta_unknown_ticker_ignored(self, watcher):

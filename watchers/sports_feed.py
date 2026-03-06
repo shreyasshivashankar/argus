@@ -41,9 +41,8 @@ class SportsFeed(ABC):
 # ---------------------------------------------------------------------------
 
 _BDL_BASE = "https://api.balldontlie.io/v1"
-_BDL_PLAYS_BASE = "https://api.balldontlie.io/nba/v1"  # Plays endpoint (GOAT tier)
 _BDL_LIVE_STATUS_PREFIXES = ("1st Qtr", "2nd Qtr", "Halftime", "3rd Qtr", "4th Qtr", "OT")
-_RECENT_PLAYS_LIMIT = 20
+_FINAL_CACHE_TTL_HOURS = 4
 
 
 class BallDontLieFeed(SportsFeed):
@@ -61,7 +60,7 @@ class BallDontLieFeed(SportsFeed):
         self._session: aiohttp.ClientSession | None = None
         self._games_cache: dict[str, dict] = {}
         self._player_stats_cache: dict[str, list[PlayerBoxScore]] = {}
-        self._plays_cache: dict[str, list[str]] = {}
+        self._games_final_since: dict[str, datetime] = {}
         self._last_api_ok: bool = True
 
     async def connect(self) -> None:
@@ -91,7 +90,6 @@ class BallDontLieFeed(SportsFeed):
 
         games_task = asyncio.create_task(self._games_poll_loop(), name="bdl_games")
         stats_task = asyncio.create_task(self._stats_poll_loop(), name="bdl_stats")
-        plays_task = asyncio.create_task(self._plays_poll_loop(), name="bdl_plays")
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="bdl_heartbeat")
 
         try:
@@ -101,9 +99,8 @@ class BallDontLieFeed(SportsFeed):
         finally:
             games_task.cancel()
             stats_task.cancel()
-            plays_task.cancel()
             heartbeat_task.cancel()
-            await asyncio.gather(games_task, stats_task, plays_task, heartbeat_task, return_exceptions=True)
+            await asyncio.gather(games_task, stats_task, heartbeat_task, return_exceptions=True)
 
     def _is_live(self, status: str) -> bool:
         if not status or status == "Final":
@@ -130,17 +127,36 @@ class BallDontLieFeed(SportsFeed):
         for g in data.get("data", []) or []:
             gid = str(g.get("id", ""))
             if gid:
+                if g.get("status") == "Final":
+                    self._games_final_since.setdefault(gid, datetime.now(timezone.utc))
+                else:
+                    self._games_final_since.pop(gid, None)
                 self._games_cache[gid] = g
 
     async def _games_poll_loop(self) -> None:
         while self._running:
             await self._fetch_games()
+            self._evict_final_games()
             for gid, g in list(self._games_cache.items()):
                 if self._is_live(g.get("status", "")):
                     gs = self._game_to_state(g, gid)
                     if gs:
                         await self._queue.put(gs)
             await asyncio.sleep(self._games_poll_interval)
+
+    def _evict_final_games(self) -> None:
+        """Evict Final games from all caches after 4 hours to prevent memory leak."""
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=_FINAL_CACHE_TTL_HOURS)
+        to_evict = [
+            gid for gid, g in self._games_cache.items()
+            if g.get("status") == "Final"
+            and self._games_final_since.get(gid, now) < cutoff
+        ]
+        for gid in to_evict:
+            self._games_cache.pop(gid, None)
+            self._player_stats_cache.pop(gid, None)
+            self._games_final_since.pop(gid, None)
 
     async def _stats_poll_loop(self) -> None:
         while self._running:
@@ -201,37 +217,6 @@ class BallDontLieFeed(SportsFeed):
         for gid, players in by_game.items():
             self._player_stats_cache[gid] = players
 
-    async def _plays_poll_loop(self) -> None:
-        """Poll play-by-play every 30s for narrative context (injury/ejection detection)."""
-        while self._running:
-            live_ids = [
-                gid for gid, g in self._games_cache.items()
-                if self._is_live(g.get("status", ""))
-            ]
-            for gid in live_ids[:15]:
-                await self._fetch_plays(gid)
-            await asyncio.sleep(30)
-
-    async def _fetch_plays(self, game_id: str) -> None:
-        """Fetch last N plays for a game from BallDontLie plays API (GOAT tier)."""
-        assert self._session is not None
-        url = f"{_BDL_PLAYS_BASE}/plays?game_id={game_id}"
-        try:
-            async with self._session.get(url) as resp:
-                if resp.status != 200:
-                    return
-                data = await resp.json()
-        except Exception:
-            return
-
-        items = data.get("data", []) or []
-        texts: list[str] = []
-        for p in sorted(items, key=lambda x: x.get("order", 0), reverse=True)[:_RECENT_PLAYS_LIMIT]:
-            t = p.get("text", "").strip()
-            if t:
-                texts.append(t)
-        self._plays_cache[game_id] = list(reversed(texts))
-
     def _game_to_state(self, g: dict, gid: str) -> GameState | None:
         try:
             home = g.get("home_team") or {}
@@ -260,7 +245,7 @@ class BallDontLieFeed(SportsFeed):
                 clock=clock,
                 timestamp=datetime.now(timezone.utc),
                 player_stats=self._player_stats_cache.get(gid, []),
-                recent_plays=self._plays_cache.get(gid, []),
+                recent_plays=[],  # Narrative fetches plays on-demand for freshness
             )
         except (KeyError, TypeError, ValueError):
             return None

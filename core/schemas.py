@@ -243,7 +243,7 @@ class AppSettings(BaseSettings):
     ORDER_GC_TTL: float = 7200.0
 
     # Capital rebalancing
-    MIN_REALLOCATE_BID: int = 90
+    MIN_REALLOCATE_BID: int = 10
     TAKER_FEE_CENTS: float = 2.0
     FOREGONE_PROFIT_MULTIPLIER: float = 0.5  # Discount resting exit profit (not guaranteed)
     REALLOCATE_DECAY_MINUTES: float = 120.0  # Time to decay hurdle to floor

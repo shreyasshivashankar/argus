@@ -5,12 +5,16 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
+import aiohttp
 from loguru import logger
 
 from core.base_agent import BaseAgent
 from core.bus import SignalBus
 from core.client import KalshiAsyncClient
 from core.schemas import AppSettings, ContextStatus
+
+_BDL_PLAYS_URL = "https://api.balldontlie.io/nba/v1/plays"
+_RECENT_PLAYS_LIMIT = 20
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +240,7 @@ class NarrativeAgent(BaseAgent):
         self._llm = llm or self._default_llm(settings)
         self._active_games: dict[str, dict[str, Any]] = {}
         self._last_llm_ok: bool = True
+        self._http_session: aiohttp.ClientSession | None = None
 
     def _heartbeat_payload(self) -> dict:
         return {**super()._heartbeat_payload(), "api_ok": self._last_llm_ok}
@@ -289,8 +294,38 @@ class NarrativeAgent(BaseAgent):
     # LLM evaluation
     # ------------------------------------------------------------------
 
+    async def _fetch_plays(self, game_id: str) -> list[str]:
+        """Fetch freshest play-by-play right before LLM call (avoids stale data)."""
+        if not self.settings.BALLDONTLIE_API_KEY:
+            return []
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession(
+                headers={"Authorization": self.settings.BALLDONTLIE_API_KEY},
+                timeout=aiohttp.ClientTimeout(total=15),
+            )
+        try:
+            async with self._http_session.get(
+                _BDL_PLAYS_URL, params={"game_id": game_id}
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+        except Exception:
+            self.log.debug("Plays fetch failed for game {}", game_id)
+            return []
+
+        items = data.get("data", []) or []
+        texts: list[str] = []
+        for p in sorted(items, key=lambda x: x.get("order", 0), reverse=True)[
+            :_RECENT_PLAYS_LIMIT
+        ]:
+            t = p.get("text", "").strip()
+            if t:
+                texts.append(t)
+        return list(reversed(texts))
+
     async def _evaluate_context(self, game_id: str, game: dict) -> None:
-        plays = game.get("recent_plays") or []
+        plays = await self._fetch_plays(game_id)
         recent_plays = "\n".join(plays) if plays else "No recent plays available."
         prompt = self._PROMPT_TEMPLATE.format(
             home=game.get("home_team", "?"),

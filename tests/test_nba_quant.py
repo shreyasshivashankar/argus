@@ -256,9 +256,9 @@ class TestReallocation:
     async def test_hurdle_not_met_no_reallocate(self, quant, mock_bus, settings, stub_strategy):
         """Foregone profit + fees exceed projected new EV → no reallocate.
 
-        Signal EV=0.02, entry=16.  Freed=91*10=910c, count=floor(910*0.5/16)=28,
-        total_new_ev=28*2=56c.  Foregone=(99-91)*10=80c, fees=10*2=20c → 100c.
-        56 < 100 → no reallocation.
+        Signal EV=0.01, entry=16.  Freed=91*10=910c, count=floor(910*0.5/16)=28,
+        total_new_ev=28*1=28c.  Foregone=(99-91)*10=80c*0.5=40c, fees≈1c (dynamic).
+        28 < 41 → no reallocation.
         """
         _inject_state(quant)
         low_ev = Signal(
@@ -268,7 +268,7 @@ class TestReallocation:
             status=SignalStatus.VALIDATED,
             confidence=0.18,
             source="stub",
-            ev_estimate=0.02,
+            ev_estimate=0.01,
             entry_price=16,
             exit_price=23,
             game_id="game-001",

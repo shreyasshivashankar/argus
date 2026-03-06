@@ -218,6 +218,15 @@ class NBAQuantAgent(BaseAgent):
         bankroll_cents = self._portfolio.bankroll * 100
         return bankroll_cents >= entry_price_cents
 
+    @staticmethod
+    def _taker_fee_cents(contracts: int, price_cents: int) -> float:
+        """Kalshi taker fee: ceil(0.07 * contracts * price * (1 - price))."""
+        if price_cents <= 0 or price_cents >= 100:
+            return 0.0
+        p = price_cents / 100.0
+        raw = 0.07 * contracts * p * (1.0 - p)
+        return float(math.ceil(raw))
+
     async def _try_reallocate(
         self,
         new_ev: float,
@@ -249,7 +258,7 @@ class NBAQuantAgent(BaseAgent):
 
             total_new_ev_cents = expected_new_count * (new_ev * 100)
             foregone_profit = (pos.target_exit_price - live_bid) * pos.remaining_count
-            fees = pos.remaining_count * self.settings.TAKER_FEE_CENTS
+            fees = self._taker_fee_cents(pos.remaining_count, live_bid)
 
             # Probability-weight: resting exit not guaranteed to fill
             expected_foregone = foregone_profit * self.settings.FOREGONE_PROFIT_MULTIPLIER

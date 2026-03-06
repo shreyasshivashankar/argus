@@ -42,10 +42,10 @@ class KalshiFeedWatcher:
         self._msg_id = 1
         self._running = True
 
-        # Local order book: ticker -> {"bids": [[price, qty], ...], "asks": [...]}
-        # Bids sorted descending (highest first), asks sorted ascending (lowest first)
-        self._orderbooks: dict[str, dict[str, list[list[int]]]] = defaultdict(
-            lambda: {"bids": [], "asks": []}
+        # Local order book: ticker -> {"bids": {price: qty}, "asks": {price: qty}}
+        # Dict avoids O(N log N) sort on every delta; best bid/ask via max/min
+        self._orderbooks: dict[str, dict[str, dict[int, int]]] = defaultdict(
+            lambda: {"bids": {}, "asks": {}}
         )
 
         # Executor callbacks
@@ -180,15 +180,12 @@ class KalshiFeedWatcher:
 
     def _handle_ob_snapshot(self, msg: dict) -> None:
         ticker = msg.get("market_ticker", "")
-        self._orderbooks[ticker] = {
-            "bids": [list(lvl) for lvl in msg.get("bids", [])],
-            "asks": [list(lvl) for lvl in msg.get("asks", [])],
-        }
-        self._sort_book(ticker)
+        bids = {int(lvl[0]): int(lvl[1]) for lvl in msg.get("bids", []) if lvl[1] > 0}
+        asks = {int(lvl[0]): int(lvl[1]) for lvl in msg.get("asks", []) if lvl[1] > 0}
+        self._orderbooks[ticker] = {"bids": bids, "asks": asks}
         logger.debug(
             "OB snapshot for {}: {} bid levels, {} ask levels",
-            ticker, len(self._orderbooks[ticker]["bids"]),
-            len(self._orderbooks[ticker]["asks"]),
+            ticker, len(bids), len(asks),
         )
 
     async def _handle_ob_delta(self, msg: dict) -> None:
@@ -196,57 +193,37 @@ class KalshiFeedWatcher:
         if ticker not in self._orderbooks:
             return
 
-        bids_delta = msg.get("bids", [])
-        asks_delta = msg.get("asks", [])
-
         book = self._orderbooks[ticker]
 
-        for price, quantity in bids_delta:
-            self._apply_delta(book["bids"], price, quantity, ascending=False)
+        for price, quantity in msg.get("bids", []):
+            self._apply_delta(book["bids"], price, quantity)
 
-        for price, quantity in asks_delta:
-            self._apply_delta(book["asks"], price, quantity, ascending=True)
+        for price, quantity in msg.get("asks", []):
+            self._apply_delta(book["asks"], price, quantity)
 
         bids = book["bids"]
         asks = book["asks"]
         try:
             market_state = MarketState(
                 ticker=ticker,
-                yes_bid=bids[0][0] if bids else 0,
-                yes_ask=asks[0][0] if asks else 0,
+                yes_bid=max(bids) if bids else 0,
+                yes_ask=min(asks) if asks else 0,
                 no_bid=0,
                 no_ask=0,
                 volume=0,
                 timestamp=datetime.utcnow(),
             )
             await self._bus.publish("market:state", market_state)
-        except (IndexError, KeyError):
+        except (ValueError, KeyError):
             pass
 
-    def _sort_book(self, ticker: str) -> None:
-        ob = self._orderbooks[ticker]
-        ob["bids"].sort(key=lambda x: x[0], reverse=True)
-        ob["asks"].sort(key=lambda x: x[0])
-
     @staticmethod
-    def _apply_delta(
-        book: list[list[int]], price: int, quantity: int, *, ascending: bool
-    ) -> None:
-        """Apply an absolute-quantity delta to a price level.
-
-        Kalshi deltas are absolute: quantity=0 means remove the level,
-        quantity>0 means set (not add) the volume at that price.
-        """
-        for i, level in enumerate(book):
-            if level[0] == price:
-                if quantity == 0:
-                    book.pop(i)
-                else:
-                    level[1] = quantity
-                return
-        if quantity > 0:
-            book.append([price, quantity])
-            book.sort(key=lambda x: x[0], reverse=(not ascending))
+    def _apply_delta(book: dict[int, int], price: int, quantity: int) -> None:
+        """Apply an absolute-quantity delta. O(1) update, no sort needed."""
+        if quantity == 0:
+            book.pop(price, None)
+        else:
+            book[price] = quantity
 
     # ------------------------------------------------------------------
     # Fill + Order callbacks (for executor)
