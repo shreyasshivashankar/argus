@@ -131,37 +131,46 @@ class TheRundownFeed(SportsFeed):
             await self.bus.publish("signal:heartbeat", {"agent": "sports_feed"})
             await asyncio.sleep(30)
 
-    async def _game_state_broadcast_loop(self) -> None:
-        """Periodically publish game:state for live events so monitor stays updated."""
-        while self._running:
-            await asyncio.sleep(15)
-            for eid, ev in list(self._event_cache.items()):
-                if ev.get("score", {}).get("event_status") in _LIVE_STATUSES:
-                    gs = self._event_to_game_state(ev, eid)
-                    if gs:
-                        await self.bus.publish("game:state", gs)
-
     async def listen(self) -> AsyncIterator[GameState]:
+        """Fan-in: WS and 2s REST score poll both push GameState into a queue."""
         assert self._session is not None
+
+        self._queue: asyncio.Queue[GameState] = asyncio.Queue()
 
         stats_task = asyncio.create_task(
             self._player_stats_poll_loop(), name="tr_stats_poll"
         )
-        event_refresh_task = asyncio.create_task(
-            self._event_refresh_loop(), name="tr_event_refresh"
+        score_task = asyncio.create_task(
+            self._score_poll_loop(), name="tr_score_poll"
         )
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(), name="tr_heartbeat"
         )
-        broadcast_task = asyncio.create_task(
-            self._game_state_broadcast_loop(), name="tr_game_broadcast"
+        ws_task = asyncio.create_task(
+            self._ws_manager(), name="tr_ws_manager"
         )
 
+        try:
+            while self._running:
+                gs = await self._queue.get()
+                yield gs
+        finally:
+            stats_task.cancel()
+            score_task.cancel()
+            heartbeat_task.cancel()
+            ws_task.cancel()
+            await asyncio.gather(
+                stats_task, score_task, heartbeat_task, ws_task,
+                return_exceptions=True,
+            )
+
+    async def _ws_manager(self) -> None:
+        """Manages WS connection and feeds GameStates into the queue."""
         reconnect_delay = self.WS_RECONNECT_DELAY
         while self._running:
             try:
                 async for gs in self._ws_stream():
-                    yield gs
+                    await self._queue.put(gs)
                     reconnect_delay = self.WS_RECONNECT_DELAY
             except asyncio.CancelledError:
                 break
@@ -171,30 +180,23 @@ class TheRundownFeed(SportsFeed):
             if not self._running:
                 break
 
-            logger.warning(
-                "WS disconnected, reconnecting in {}s (falling back to REST)",
-                reconnect_delay,
-            )
-            try:
-                async for gs in self._rest_fallback(reconnect_delay):
-                    yield gs
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("REST fallback failed")
-
+            logger.warning("WS disconnected, reconnecting in {}s", reconnect_delay)
+            await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(
                 reconnect_delay * 2, self.WS_MAX_RECONNECT_DELAY
             )
 
-        stats_task.cancel()
-        event_refresh_task.cancel()
-        heartbeat_task.cancel()
-        broadcast_task.cancel()
-        await asyncio.gather(
-            stats_task, event_refresh_task, heartbeat_task, broadcast_task,
-            return_exceptions=True,
-        )
+    async def _score_poll_loop(self) -> None:
+        """Aggressively poll REST for score updates every 2s (breaks odds-lock freeze)."""
+        while self._running:
+            await self._bootstrap_todays_events()
+            for event_id, ev in list(self._event_cache.items()):
+                status = ev.get("score", {}).get("event_status", "")
+                if status in _LIVE_STATUSES:
+                    gs = self._event_to_game_state(ev, event_id)
+                    if gs:
+                        await self._queue.put(gs)
+            await asyncio.sleep(2.0)
 
     # ------------------------------------------------------------------
     # WebSocket stream
@@ -242,25 +244,6 @@ class TheRundownFeed(SportsFeed):
                     break
 
     # ------------------------------------------------------------------
-    # REST fallback (used when WS disconnects)
-    # ------------------------------------------------------------------
-
-    async def _rest_fallback(self, duration: float) -> AsyncIterator[GameState]:
-        """Poll REST events for ``duration`` seconds while WS reconnects."""
-        assert self._session is not None
-        deadline = asyncio.get_event_loop().time() + duration
-        while self._running and asyncio.get_event_loop().time() < deadline:
-            await self._bootstrap_todays_events()
-            for event_id, ev in self._event_cache.items():
-                status = ev.get("score", {}).get("event_status", "")
-                if status not in _LIVE_STATUSES:
-                    continue
-                gs = self._event_to_game_state(ev, event_id)
-                if gs:
-                    yield gs
-            await asyncio.sleep(min(5.0, duration))
-
-    # ------------------------------------------------------------------
     # Event bootstrap (REST)
     # ------------------------------------------------------------------
 
@@ -289,16 +272,10 @@ class TheRundownFeed(SportsFeed):
         statuses = {
             ev.get("score", {}).get("event_status", "?") for ev in events
         }
-        logger.info(
+        logger.debug(
             "Bootstrapped {} NBA events | statuses: {}",
             len(events), statuses,
         )
-
-    async def _event_refresh_loop(self) -> None:
-        """Periodically re-bootstrap events to discover new games and status changes."""
-        while self._running:
-            await asyncio.sleep(300)
-            await self._bootstrap_todays_events()
 
     # ------------------------------------------------------------------
     # Player stats polling (REST)
