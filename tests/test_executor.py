@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from freezegun import freeze_time
@@ -514,8 +514,15 @@ class TestVelocityBreaker:
 class TestHardStop:
 
     @pytest.mark.asyncio
-    async def test_hard_stop_cancels_and_market_sells(self, executor):
-        """After timeout, unfilled exit is canceled and replaced with 1c sell."""
+    async def test_hard_stop_cancels_and_market_sells_with_floor(self, executor):
+        """After timeout, unfilled exit is canceled and replaced with a sell
+        at max(1, entry_price - 15), not 1c."""
+        entry_order = make_order(count=10, yes_price=40, client_order_id="entry-fc")
+        entry = make_managed_order(order=entry_order, state=OrderState.FILLED)
+        entry.fill_count = 10
+        entry.vwap_cents = 40.0
+        executor._orders["entry-fc"] = entry
+
         exit_order = make_order(
             action=Action.SELL, count=10, yes_price=45, client_order_id="exit-fc"
         )
@@ -536,8 +543,35 @@ class TestHardStop:
         executor.client.place_order.assert_called_once()
         placed = executor.client.place_order.call_args[0][0]
         assert placed.action == Action.SELL
-        assert placed.yes_price == 1
+        assert placed.yes_price == 25  # max(1, 40 - 15) = 25
         assert placed.count == 10
+
+    @pytest.mark.asyncio
+    async def test_hard_stop_floor_clamps_to_one(self, executor):
+        """If entry price is very low, floor clamps to 1c (not negative)."""
+        entry_order = make_order(count=10, yes_price=10, client_order_id="entry-fc-low")
+        entry = make_managed_order(order=entry_order, state=OrderState.FILLED)
+        entry.fill_count = 10
+        entry.vwap_cents = 10.0
+        executor._orders["entry-fc-low"] = entry
+
+        exit_order = make_order(
+            action=Action.SELL, count=10, yes_price=15, client_order_id="exit-fc-low"
+        )
+        exit_managed = make_managed_order(
+            order=exit_order, state=OrderState.RESTING, is_exit=True,
+            parent_entry_id="entry-fc-low",
+        )
+        exit_managed.kalshi_order_id = "kalshi-exit-fc-low"
+        executor._orders["exit-fc-low"] = exit_managed
+
+        executor.settings.FLASH_CRASH_HARD_STOP_TIMEOUT = 0.05
+
+        task = asyncio.create_task(executor._hard_stop_timer("exit-fc-low"))
+        await asyncio.sleep(0.15)
+
+        placed = executor.client.place_order.call_args[0][0]
+        assert placed.yes_price == 1  # max(1, 10 - 15) = max(1, -5) = 1
 
     @pytest.mark.asyncio
     async def test_hard_stop_canceled_on_fill(self, executor):
@@ -641,3 +675,62 @@ class TestFlashCrashEntryTagging:
 
         executor.client.place_order.assert_called_once()
         assert len(executor._flash_crash_entries) == 0
+
+
+# ===========================================================================
+# Drawdown session boundary (UTC midnight edge case)
+# ===========================================================================
+
+class TestDrawdownSessionBoundary:
+    """Verify the drawdown query uses the 11 AM UTC session boundary
+    instead of CURRENT_DATE, so the kill switch doesn't silently reset
+    during NBA prime-time (8 PM EST = midnight UTC)."""
+
+    def test_before_reset_hour_uses_previous_day(self):
+        """At 1:00 AM UTC (8:00 PM EST on Mar 4), session_start should be
+        the *previous* day at 11:00 AM UTC — not today."""
+        from agents.executor import OrderExecutor
+
+        now = datetime(2026, 3, 5, 1, 0, 0, tzinfo=timezone.utc)
+        result = OrderExecutor._session_start(now)
+        expected = datetime(2026, 3, 4, 11, 0, 0, tzinfo=timezone.utc)
+        assert result == expected
+
+    def test_at_utc_midnight_uses_previous_day(self):
+        """At exactly midnight UTC, session_start should still be
+        the previous day at 11 AM UTC."""
+        from agents.executor import OrderExecutor
+
+        now = datetime(2026, 3, 5, 0, 0, 0, tzinfo=timezone.utc)
+        result = OrderExecutor._session_start(now)
+        expected = datetime(2026, 3, 4, 11, 0, 0, tzinfo=timezone.utc)
+        assert result == expected
+
+    def test_after_reset_hour_uses_same_day(self):
+        """At 3:00 PM UTC (10:00 AM EST), session_start should be
+        today at 11:00 AM UTC (same day)."""
+        from agents.executor import OrderExecutor
+
+        now = datetime(2026, 3, 5, 15, 0, 0, tzinfo=timezone.utc)
+        result = OrderExecutor._session_start(now)
+        expected = datetime(2026, 3, 5, 11, 0, 0, tzinfo=timezone.utc)
+        assert result == expected
+
+    def test_exactly_at_reset_hour(self):
+        """At exactly 11:00 AM UTC, session_start should be same day 11 AM."""
+        from agents.executor import OrderExecutor
+
+        now = datetime(2026, 3, 5, 11, 0, 0, tzinfo=timezone.utc)
+        result = OrderExecutor._session_start(now)
+        expected = datetime(2026, 3, 5, 11, 0, 0, tzinfo=timezone.utc)
+        assert result == expected
+
+    def test_late_night_nba_window(self):
+        """At 5:30 AM UTC (12:30 AM EST), deep into the late NBA slate,
+        session should still anchor to previous day's 11 AM UTC."""
+        from agents.executor import OrderExecutor
+
+        now = datetime(2026, 3, 5, 5, 30, 0, tzinfo=timezone.utc)
+        result = OrderExecutor._session_start(now)
+        expected = datetime(2026, 3, 4, 11, 0, 0, tzinfo=timezone.utc)
+        assert result == expected

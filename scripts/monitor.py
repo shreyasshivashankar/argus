@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import asyncpg
+from loguru import logger
 from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
@@ -279,6 +281,53 @@ class ArgusMonitor:
         return layout
 
     # ------------------------------------------------------------------
+    # Postgres PnL seed
+    # ------------------------------------------------------------------
+
+    async def _seed_pnl_from_postgres(self) -> None:
+        """Query Postgres for today's realized PnL so reopening the monitor
+        doesn't reset the displayed session P&L to $0."""
+        try:
+            pool = await asyncpg.create_pool(
+                self.settings.DATABASE_URL, min_size=1, max_size=1,
+            )
+        except Exception:
+            logger.warning("Monitor: Postgres unavailable — starting PnL at $0")
+            return
+
+        try:
+            now_utc = datetime.now(timezone.utc)
+            reset_hour = 11  # 11:00 AM UTC == 6:00 AM EST
+            session_start = now_utc.replace(
+                hour=reset_hour, minute=0, second=0, microsecond=0,
+            )
+            if now_utc.hour < reset_hour:
+                session_start -= timedelta(days=1)
+
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """SELECT COALESCE(SUM(pnl_dollars), 0) AS total_pnl,
+                              COUNT(*) FILTER (WHERE pnl_dollars > 0) AS wins,
+                              COUNT(*) FILTER (WHERE pnl_dollars < 0) AS losses
+                       FROM trades
+                       WHERE created_at >= $1
+                         AND status = 'EXECUTED'""",
+                    session_start,
+                )
+            if row:
+                self.total_pnl = float(row["total_pnl"])
+                self.wins = int(row["wins"])
+                self.losses = int(row["losses"])
+                logger.info(
+                    "Monitor: seeded PnL=${:.2f} ({}W-{}L) from Postgres",
+                    self.total_pnl, self.wins, self.losses,
+                )
+        except Exception:
+            logger.warning("Monitor: Postgres PnL query failed — starting at $0")
+        finally:
+            await pool.close()
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
@@ -299,6 +348,8 @@ class ArgusMonitor:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._stop)
+
+        await self._seed_pnl_from_postgres()
 
         sub_task = asyncio.create_task(
             self.bus.subscribe(_CHANNELS, self._on_message)

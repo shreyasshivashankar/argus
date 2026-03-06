@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import asyncpg
@@ -208,16 +208,21 @@ class OrderExecutor(BaseAgent):
         except Exception:
             self.log.warning("Postgres pool init failed — drawdown kill switch disabled")
 
-        balance_task = asyncio.create_task(self._balance_poll_loop())
-        signal_task = asyncio.create_task(
-            self.bus.subscribe(
-                ["signal:validated", "signal:reallocate", "SYSTEM:HALT"],
-                self._on_signal,
+        try:
+            balance_task = asyncio.create_task(self._balance_poll_loop())
+            signal_task = asyncio.create_task(
+                self.bus.subscribe(
+                    ["signal:validated", "signal:reallocate", "SYSTEM:HALT"],
+                    self._on_signal,
+                )
             )
-        )
-        gc_task = asyncio.create_task(self._gc_loop())
-        drawdown_task = asyncio.create_task(self._drawdown_check_loop())
-        await asyncio.gather(balance_task, signal_task, gc_task, drawdown_task)
+            gc_task = asyncio.create_task(self._gc_loop())
+            drawdown_task = asyncio.create_task(self._drawdown_check_loop())
+            await asyncio.gather(balance_task, signal_task, gc_task, drawdown_task)
+        finally:
+            if self._pg_pool is not None:
+                await self._pg_pool.close()
+                self.log.info("Postgres connection pool closed")
 
     # ------------------------------------------------------------------
     # Background bankroll cache
@@ -829,13 +834,20 @@ class OrderExecutor(BaseAgent):
         if remaining <= 0:
             return
 
+        entry_price = 0
+        if managed.parent_entry_id:
+            entry = self._orders.get(managed.parent_entry_id)
+            if entry:
+                entry_price = int(entry.vwap_cents)
+        floor_price = max(1, entry_price - 15)
+
         market_sell = Order(
             ticker=managed.order.ticker,
             action=Action.SELL,
             side=managed.order.side,
             count=remaining,
-            yes_price=1 if managed.order.side == Side.YES else None,
-            no_price=1 if managed.order.side == Side.NO else None,
+            yes_price=floor_price if managed.order.side == Side.YES else None,
+            no_price=floor_price if managed.order.side == Side.NO else None,
         )
 
         sell_managed = ManagedOrder(
@@ -853,8 +865,8 @@ class OrderExecutor(BaseAgent):
             sell_managed.kalshi_order_id = kalshi_id
             self._kalshi_to_client[kalshi_id] = market_sell.client_order_id
             self.log.warning(
-                "HARD STOP: market sell placed {} x{} @1c (kalshi={})",
-                market_sell.ticker, remaining, kalshi_id,
+                "HARD STOP: market sell placed {} x{} @{}c (kalshi={})",
+                market_sell.ticker, remaining, floor_price, kalshi_id,
             )
         except Exception:
             self.log.exception("HARD STOP: failed to place market sell")
@@ -863,6 +875,23 @@ class OrderExecutor(BaseAgent):
     # ------------------------------------------------------------------
     # Global drawdown kill switch (Postgres session PnL)
     # ------------------------------------------------------------------
+
+    SESSION_RESET_HOUR_UTC = 11  # 11:00 AM UTC == 6:00 AM EST
+
+    @staticmethod
+    def _session_start(now_utc: datetime) -> datetime:
+        """Return the start of the current trading session.
+
+        The boundary is 11:00 AM UTC (6:00 AM EST) so the session window
+        spans the entire NBA prime-time slate without resetting at UTC midnight.
+        """
+        boundary = now_utc.replace(
+            hour=OrderExecutor.SESSION_RESET_HOUR_UTC,
+            minute=0, second=0, microsecond=0,
+        )
+        if now_utc.hour < OrderExecutor.SESSION_RESET_HOUR_UTC:
+            boundary -= timedelta(days=1)
+        return boundary
 
     async def _drawdown_check_loop(self) -> None:
         """Periodically query Postgres for session PnL and halt if breached."""
@@ -874,12 +903,15 @@ class OrderExecutor(BaseAgent):
                 continue
 
             try:
+                session_start = self._session_start(datetime.now(timezone.utc))
+
                 async with self._pg_pool.acquire() as conn:
                     row = await conn.fetchrow(
                         """SELECT COALESCE(SUM(pnl_dollars), 0) AS total_pnl
                            FROM trades
-                           WHERE created_at >= CURRENT_DATE
-                             AND status = 'EXECUTED'"""
+                           WHERE created_at >= $1
+                             AND status = 'EXECUTED'""",
+                        session_start,
                     )
                 session_pnl = float(row["total_pnl"]) if row else 0.0
             except Exception:
