@@ -225,6 +225,7 @@ class OrderExecutor(BaseAgent):
                 entry_vwap=entry_vwap,
                 target_exit_price=exit_price,
                 kalshi_order_id=managed.kalshi_order_id or "",
+                created_at=managed.created_at,
             ))
         state = PortfolioState(bankroll=self.current_bankroll, positions=positions)
         await self.bus.publish("portfolio:state", state)

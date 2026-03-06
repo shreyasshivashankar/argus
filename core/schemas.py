@@ -174,6 +174,7 @@ class PortfolioPosition(BaseModel):
     entry_vwap: float
     target_exit_price: int
     kalshi_order_id: str
+    created_at: Optional[datetime] = None  # For time-decay hurdle
 
 
 class PortfolioState(BaseModel):
@@ -202,9 +203,10 @@ class AppSettings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379"
 
-    # Sports data — TheRundown (Ultra tier WebSocket + REST)
-    THERUNDOWN_API_KEY: str = ""
-    SPORTS_POLL_INTERVAL: float = 30.0
+    # Sports data — BallDontLie GOAT (600 req/min), poll ~550/min
+    BALLDONTLIE_API_KEY: str = ""
+    SPORTS_GAMES_POLL_INTERVAL: float = 0.4  # Games: 150/min
+    SPORTS_POLL_INTERVAL: float = 0.4  # Stats: ~400/min with pagination
 
     # LLM — provider selection: "openai", "anthropic", or "gemini"
     LLM_PROVIDER: str = "gemini"
@@ -213,16 +215,16 @@ class AppSettings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-3-pro"
+    GEMINI_MODEL: str = "gemini-2.5-pro"
 
     # Alerts
     TELEGRAM_CHAT_ID: str = ""
 
-    # Risk management
+    # Risk management — latency-tolerant (retail data: beat on math, not speed)
     DAILY_STOP_LOSS_USD: float = 100.0
     SLIPPAGE_TICKS: int = 2
-    KELLY_FRACTION: float = 0.5
-    TARGET_EXIT_SPREAD: int = 7  # cents above entry
+    KELLY_FRACTION: float = 0.45  # Conservative; fewer, bigger edges
+    TARGET_EXIT_SPREAD: int = 5  # Tighter spread = faster fills, higher capital velocity
 
     # Polling intervals (seconds)
     CONTEXT_POLL_INTERVAL: float = 15.0
@@ -232,8 +234,8 @@ class AppSettings(BaseSettings):
     # Context cache TTL (seconds)
     CONTEXT_TTL: int = 300
 
-    # EV threshold (cents) to trigger a trade signal
-    EV_THRESHOLD: float = 3.0
+    # EV threshold (cents) — only fire on large mispricings (retail data delay)
+    EV_THRESHOLD: float = 6.0
 
     # Order GC: how often to sweep (seconds) and max age of terminal orders (seconds)
     ORDER_GC_INTERVAL: float = 300.0
@@ -242,6 +244,9 @@ class AppSettings(BaseSettings):
     # Capital rebalancing
     MIN_REALLOCATE_BID: int = 90
     TAKER_FEE_CENTS: float = 2.0
+    FOREGONE_PROFIT_MULTIPLIER: float = 0.5  # Discount resting exit profit (not guaranteed)
+    REALLOCATE_DECAY_MINUTES: float = 120.0  # Time to decay hurdle to floor
+    REALLOCATE_DECAY_FLOOR: float = 0.2  # Min foregone multiplier (most aggressive)
 
     # Trade database (Postgres)
     DATABASE_URL: str = "postgresql://argus:argus@localhost:5432/argus"

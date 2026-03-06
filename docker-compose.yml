@@ -79,9 +79,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://argus:argus@postgres:5432/argus
     tty: true
     stdin_open: true
     profiles:

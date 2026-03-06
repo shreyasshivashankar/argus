@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
@@ -251,7 +251,26 @@ class NBAQuantAgent(BaseAgent):
             foregone_profit = (pos.target_exit_price - live_bid) * pos.remaining_count
             fees = pos.remaining_count * self.settings.TAKER_FEE_CENTS
 
-            if total_new_ev_cents <= foregone_profit + fees:
+            # Probability-weight: resting exit not guaranteed to fill
+            expected_foregone = foregone_profit * self.settings.FOREGONE_PROFIT_MULTIPLIER
+
+            # Time-decay: longer-stuck positions get lower hurdle
+            if pos.created_at:
+                created = pos.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                age_minutes = (
+                    datetime.now(timezone.utc) - created
+                ).total_seconds() / 60.0
+                decay = max(
+                    self.settings.REALLOCATE_DECAY_FLOOR,
+                    1.0
+                    - (age_minutes / self.settings.REALLOCATE_DECAY_MINUTES)
+                    * (1.0 - self.settings.REALLOCATE_DECAY_FLOOR),
+                )
+                expected_foregone *= decay
+
+            if total_new_ev_cents <= expected_foregone + fees:
                 continue
 
             signal = Signal(
@@ -269,10 +288,10 @@ class NBAQuantAgent(BaseAgent):
             )
             await self.bus.publish("signal:reallocate", signal)
             self.log.info(
-                "REALLOCATE: liquidate {} x{} @{} (foregone={:.0f}c, fees={:.0f}c) "
+                "REALLOCATE: liquidate {} x{} @{} (foregone={:.0f}c→{:.0f}c hurdle, fees={:.0f}c) "
                 "for new EV={:.0f}c on {}",
                 pos.ticker, pos.remaining_count, live_bid,
-                foregone_profit, fees, total_new_ev_cents, market.ticker,
+                foregone_profit, expected_foregone, fees, total_new_ev_cents, market.ticker,
             )
             return
 

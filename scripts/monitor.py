@@ -125,9 +125,10 @@ class ArgusMonitor:
             self.heartbeats[agent] = now
             ts_now = datetime.utcnow()
             self.feed_ts[agent] = ts_now
-            if agent == "sports_feed":
+            api_ok = data.get("api_ok", True)
+            if agent == "sports_feed" and api_ok is not False:
                 self.feed_ts["sports"] = ts_now
-            elif agent == "narrative":
+            elif agent == "narrative" and api_ok is not False:
                 self.feed_ts["narrative"] = ts_now
 
         elif channel == "game:state":
@@ -136,10 +137,15 @@ class ArgusMonitor:
                 self.games[gid] = data
                 ctx_status, _ = await self.bus.get_context(gid)
                 self.context_cache[gid] = ctx_status.value
-            self.feed_ts["sports"] = datetime.utcnow()
+            if gid and data.get("home_team") and data.get("away_team"):
+                self.feed_ts["sports"] = datetime.utcnow()
 
         elif channel == "market:state":
-            self.feed_ts["kalshi"] = datetime.utcnow()
+            ticker = data.get("ticker", "")
+            yes_bid = data.get("yes_bid")
+            yes_ask = data.get("yes_ask")
+            if ticker and isinstance(yes_bid, (int, float)) and isinstance(yes_ask, (int, float)):
+                self.feed_ts["kalshi"] = datetime.utcnow()
 
         self.trades = self.trades[:MAX_EVENTS]
 
@@ -208,7 +214,7 @@ class ArgusMonitor:
         # --- Agent & feed health ---
         ag_table = Table(expand=True, show_edge=False)
         ag_table.add_column("Component", width=16)
-        ag_table.add_column("Status", width=8)
+        ag_table.add_column("Status", width=10)
         ag_table.add_column("Last Update", width=12)
 
         utcnow = datetime.utcnow()
@@ -218,20 +224,27 @@ class ArgusMonitor:
             ("kalshi", "Kalshi WS"),
             ("narrative", "LLM / Narr."),
         ]
+        all_healthy = True
         for key, label in feed_labels:
             ts = self.feed_ts.get(key)
             if ts is None:
-                ag_table.add_row(f"[dim]{label}[/dim]", "[dim]---[/dim]", "[dim]waiting[/dim]")
+                ag_table.add_row(f"[dim]{label}[/dim]", "[red]Unhealthy[/red]", "[dim]waiting[/dim]")
+                all_healthy = False
             else:
                 age = (utcnow - ts).total_seconds()
                 ts_str = ts.strftime("%H:%M:%S")
                 if age < 60:
-                    ag_table.add_row(f"[green]{label}[/green]", "[green]OK[/green]", ts_str)
+                    ag_table.add_row(f"[green]{label}[/green]", "[green]Healthy[/green]", ts_str)
                 elif age < 300:
-                    ag_table.add_row(f"[yellow]{label}[/yellow]", "[yellow]STALE[/yellow]", ts_str)
+                    ag_table.add_row(f"[yellow]{label}[/yellow]", "[yellow]Unhealthy[/yellow]", ts_str)
+                    all_healthy = False
                 else:
-                    ag_table.add_row(f"[red]{label}[/red]", "[red]DOWN[/red]", ts_str)
+                    ag_table.add_row(f"[red]{label}[/red]", "[red]Unhealthy[/red]", ts_str)
+                    all_healthy = False
 
+        overall = "[green]Healthy[/green]" if all_healthy else "[red]Unhealthy[/red]"
+        ag_table.add_row("", "", "")
+        ag_table.add_row("[bold]APIs[/bold]", overall, "[dim]valid responses[/dim]" if all_healthy else "[dim]stale/missing[/dim]")
         ag_table.add_row("", "", "")
 
         for agent in ("nba_quant", "executor", "paper_executor", "track"):

@@ -234,6 +234,10 @@ class NarrativeAgent(BaseAgent):
         super().__init__("narrative", settings, bus, client)
         self._llm = llm or self._default_llm(settings)
         self._active_games: dict[str, dict[str, Any]] = {}
+        self._last_llm_ok: bool = True
+
+    def _heartbeat_payload(self) -> dict:
+        return {**super()._heartbeat_payload(), "api_ok": self._last_llm_ok}
 
     @staticmethod
     def _default_llm(settings: AppSettings) -> LLMProvider:
@@ -295,7 +299,9 @@ class NarrativeAgent(BaseAgent):
         try:
             response = await self._llm.query(prompt)
             response = response.strip()
+            self._last_llm_ok = True
         except Exception:
+            self._last_llm_ok = False
             self.log.exception("LLM query failed for game {}", game_id)
             await self.bus.set_context(
                 game_id,

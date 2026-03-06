@@ -43,13 +43,15 @@ GEMINI_API_KEY=AIza...          # Gemini
 OPENAI_API_KEY=sk-...           # OpenAI
 ```
 
-Sports data -- TheRundown (Ultra tier):
+Sports data — BallDontLie (GOAT tier, 600 req/min):
 
 ```
-THERUNDOWN_API_KEY=your-key-here
+BALLDONTLIE_API_KEY=your-key-here
+SPORTS_GAMES_POLL_INTERVAL=0.5
+SPORTS_POLL_INTERVAL=0.5
 ```
 
-Get an API key at [therundown.io/api](https://therundown.io/api). The Ultra tier provides a WebSocket feed for real-time score/clock pushes (zero rate limit cost) plus REST endpoints for live player stats. Player props require a tier that supports player game stats.
+Get an API key at [app.balldontlie.io](https://app.balldontlie.io). GOAT tier provides games, box scores, and player stats. Polls ~500 req/min under the 600 limit.
 
 ### 3. Run
 
@@ -192,7 +194,7 @@ argus/
 │   └── base_agent.py          # Base class for all agents
 │
 ├── watchers/
-│   ├── sports_feed.py         # Game scores + player stats (TheRundown WebSocket + REST)
+│   ├── sports_feed.py         # Game scores + player stats (BallDontLie REST)
 │   └── kalshi_feed.py         # Kalshi order book + fills via WebSocket
 │
 ├── agents/

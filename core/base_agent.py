@@ -43,7 +43,7 @@ class BaseAgent(ABC):
         logger.add(
             f"logs/{self.name}.log",
             rotation="50 MB",
-            retention="7 days",
+            retention="2 days",
             level="DEBUG",
             filter=lambda record: record["extra"].get("agent") == self.name,
             enqueue=True,
@@ -59,12 +59,13 @@ class BaseAgent(ABC):
         """Agent-specific main loop. Must be implemented by subclasses."""
         ...
 
+    def _heartbeat_payload(self) -> dict:
+        """Override in subclasses to add extra fields (e.g. api_ok)."""
+        return {"agent": self.name, "ts": datetime.utcnow().isoformat()}
+
     async def heartbeat(self) -> None:
         while self._running:
-            await self.bus.publish(
-                "signal:heartbeat",
-                {"agent": self.name, "ts": datetime.utcnow().isoformat()},
-            )
+            await self.bus.publish("signal:heartbeat", self._heartbeat_payload())
             await asyncio.sleep(self.settings.HEARTBEAT_INTERVAL)
 
     async def start(self) -> None:

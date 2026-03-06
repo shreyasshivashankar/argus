@@ -27,7 +27,7 @@ from core.bus import SignalBus
 from core.client import KalshiAsyncClient
 from core.schemas import AppSettings
 from watchers.kalshi_feed import KalshiFeedWatcher
-from watchers.sports_feed import TheRundownFeed
+from watchers.sports_feed import BallDontLieFeed
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,7 +67,7 @@ async def main(
 
     logger.remove()
     logger.add(sys.stderr, level="INFO")
-    logger.add("logs/argus.log", rotation="50 MB", retention="7 days", level="DEBUG", enqueue=True)
+    logger.add("logs/argus.log", rotation="50 MB", retention="2 days", level="DEBUG", enqueue=True)
     logger.info("Argus starting — env={}, mode={}", settings.KALSHI_ENV, mode_label)
 
     # --- Core infrastructure ---
@@ -75,8 +75,8 @@ async def main(
     client = KalshiAsyncClient(settings)
 
     # --- Watchers ---
-    sports_feed = TheRundownFeed(settings, bus)
-    logger.info("Using TheRundownFeed (WebSocket + REST stats, Ultra tier)")
+    sports_feed = BallDontLieFeed(settings, bus)
+    logger.info("Using BallDontLieFeed (GOAT, ~500 req/min)")
     kalshi_feed = KalshiFeedWatcher(client, bus)
 
     # --- Agents ---

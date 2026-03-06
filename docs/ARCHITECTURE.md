@@ -125,12 +125,10 @@ Async `redis.asyncio` wrapper with two distinct roles:
 ### `watchers/sports_feed.py` -- Sports Data Watcher
 
 - **`SportsFeed`** -- ABC with `async connect()`, `async listen()` yielding `GameState`
-- **`TheRundownFeed(SportsFeed)`** -- Production feed using TheRundown Ultra tier:
-  - **V1 WebSocket** (`wss://therundown.io/api/v1/ws?sport_ids=4`) — real-time event pushes with scores, `game_period`, `display_clock`, and `event_status`. WebSocket connections do NOT count against the REST rate limit, so score updates arrive instantly with zero API cost.
-  - **V2 REST player stats** (`GET /api/v2/events/{eventID}/players/stats`) — per-player box scores polled at `SPORTS_POLL_INTERVAL` (default 5s) for each live game. Rate limit budget tracked via `X-RateLimit-Remaining` headers; backs off before hitting the cap.
-  - **REST fallback** — if the WebSocket disconnects, polls events via REST with exponential backoff until reconnection.
-  - **Event bootstrap** — fetches today's NBA events on startup and every 5 minutes to discover new games and status transitions.
-  - **Team resolution** — fetches `/api/v2/sports/4/teams` once at startup to map `team_id` → abbreviation for player stats.
+- **`BallDontLieFeed(SportsFeed)`** -- Production feed using BallDontLie GOAT (600 req/min):
+  - **Games** (`GET /v1/games?dates[]=...`) — polled every 0.5s for scores, quarter, clock (~120 req/min)
+  - **Stats** (`GET /v1/stats?game_ids[]=...`) — polled every 0.5s for player box scores (~300 req/min with pagination)
+  - Total ~500 req/min, under 600 limit
 
 ### `watchers/kalshi_feed.py` -- Kalshi Order Book + Fill Watcher
 
@@ -151,7 +149,7 @@ Multi-strategy portfolio manager. Subscribes to `game:state`, `market:state`, an
 - `agents/strategies/base.py` -- `BaseStrategy` ABC with `can_evaluate(market)` and `evaluate(game, market) -> Signal | None`
 - `agents/strategies/moneyline.py` -- Logistic reversal model for game-winner (GAME) tickers. Directional: resolves which team the ticker targets.
 - `agents/strategies/totals.py` -- Pace projection model for over/under (TOTAL) tickers. Projects final score from current pace, compares to Kalshi line.
-- `agents/strategies/player_props.py` -- Usage-rate projection for player points (PLAYERPTS/PTS) tickers. Calculates FGA share of team total, projects final points from live pace, and compares to the Kalshi prop line. Requires `player_stats` in `GameState` (populated by TheRundown V2 REST stats).
+- `agents/strategies/player_props.py` -- Usage-rate projection for player points (PLAYERPTS/PTS) tickers. Requires `player_stats` in `GameState` (populated by BallDontLie stats API).
 
 **Evaluation flow (no external async I/O in the hot path):**
 
@@ -216,7 +214,7 @@ Key behaviors:
 - Instantiates `SignalBus`, `KalshiAsyncClient`
 - Wires the `KalshiFeedWatcher`'s fill/order callbacks to the `OrderExecutor`
 - Launches all concurrently via `asyncio.gather`:
-  - `TheRundownFeed`
+  - `BallDontLieFeed`
   - `KalshiFeedWatcher`
   - `NBAQuantAgent`
   - `NarrativeAgent` (background)
@@ -231,7 +229,7 @@ Key behaviors:
 - Limit orders only. There's no market order codepath anywhere in the system.
 - Context keys have a 5-minute TTL. If the Narrative Agent dies, keys expire and the bot stops on its own.
 - 0.65 Kelly fraction by default. Tuned for growth while preserving win rate.
-- `SportsFeed` and `LLMProvider` are interfaces. Swap TheRundown for another provider, or Gemini for Claude, by writing a subclass.
+- `SportsFeed` and `LLMProvider` are interfaces. Swap BallDontLie for another provider, or Gemini for Claude, by writing a subclass.
 - Strategies are pluggable too. Drop a new file in `agents/strategies/`, implement `BaseStrategy`, add it to the constructor list.
 
 ## Capital Rebalancing (Opportunity Cost Engine)
@@ -245,13 +243,15 @@ When the Quant Agent detects a +EV anomaly but the bankroll is insufficient, it 
 3. On a new +EV signal with insufficient bankroll, the quant agent evaluates each resting exit:
    - Only positions with `live_bid >= MIN_REALLOCATE_BID` (default 90c) are considered
    - Calculates freed capital and projects a Kelly-sized new trade count
-   - Compares `total_new_ev_cents` against `foregone_profit + taker_fees`
+   - **Probability-weight**: `foregone_profit` is discounted by `FOREGONE_PROFIT_MULTIPLIER` (default 0.5) since resting exits are not guaranteed to fill
+   - **Time-decay**: the hurdle drops over time via `REALLOCATE_DECAY_MINUTES` (120) and `REALLOCATE_DECAY_FLOOR` (0.2)—positions stuck 2+ hours get the most aggressive reallocation
+   - Compares `total_new_ev_cents` against `expected_foregone + taker_fees`
 4. If the hurdle clears, publishes `Signal(status=REALLOCATE, target_order_id=...)` to `signal:reallocate`
 5. `OrderExecutor` cancels the specific resting exit by `target_order_id`, waits 500ms for exchange inventory settlement, then places an aggressive limit sell at the current bid
 
 **Invariants:**
 
-- Hurdle rate is unit-correct: total projected EV (from freed capital) vs total foregone profit + fees
+- Hurdle rate is unit-correct: total projected EV (from freed capital) vs probability-weighted, time-decayed foregone profit + fees
 - `target_order_id` ensures exact order targeting when multiple partial-fill exits exist for the same ticker
 - 500ms settle delay between cancel and aggressive sell prevents Kalshi 400 errors from insufficient inventory
 - The new buy signal is NOT published during reallocation -- the next WS tick naturally re-detects the anomaly once capital frees up
