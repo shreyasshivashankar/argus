@@ -224,8 +224,8 @@ class NBAQuantAgent(BaseAgent):
         if price_cents <= 0 or price_cents >= 100:
             return 0.0
         p = price_cents / 100.0
-        raw = 0.07 * contracts * p * (1.0 - p)
-        return float(math.ceil(raw))
+        raw_cents = 0.07 * contracts * p * (1.0 - p) * 100
+        return float(math.ceil(raw_cents))
 
     async def _try_reallocate(
         self,

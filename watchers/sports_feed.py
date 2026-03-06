@@ -245,7 +245,6 @@ class BallDontLieFeed(SportsFeed):
                 clock=clock,
                 timestamp=datetime.now(timezone.utc),
                 player_stats=self._player_stats_cache.get(gid, []),
-                recent_plays=[],  # Narrative fetches plays on-demand for freshness
             )
         except (KeyError, TypeError, ValueError):
             return None

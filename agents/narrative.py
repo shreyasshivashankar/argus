@@ -286,8 +286,11 @@ class NarrativeAgent(BaseAgent):
                     "Evaluating context for {} active game(s)",
                     len(self._active_games),
                 )
-            for game_id, game in list(self._active_games.items()):
-                await self._evaluate_context(game_id, game)
+            tasks = [
+                self._evaluate_context(game_id, game)
+                for game_id, game in self._active_games.items()
+            ]
+            await asyncio.gather(*tasks)
             await asyncio.sleep(self.settings.CONTEXT_POLL_INTERVAL)
 
     # ------------------------------------------------------------------

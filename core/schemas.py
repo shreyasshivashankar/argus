@@ -90,7 +90,6 @@ class GameState(BaseModel):
     clock: str
     timestamp: datetime
     player_stats: list[PlayerBoxScore] = Field(default_factory=list)
-    recent_plays: list[str] = Field(default_factory=list)  # Play-by-play text for narrative
 
 
 class MarketState(BaseModel):
@@ -244,7 +243,6 @@ class AppSettings(BaseSettings):
 
     # Capital rebalancing
     MIN_REALLOCATE_BID: int = 10
-    TAKER_FEE_CENTS: float = 2.0
     FOREGONE_PROFIT_MULTIPLIER: float = 0.5  # Discount resting exit profit (not guaranteed)
     REALLOCATE_DECAY_MINUTES: float = 120.0  # Time to decay hurdle to floor
     REALLOCATE_DECAY_FLOOR: float = 0.2  # Min foregone multiplier (most aggressive)

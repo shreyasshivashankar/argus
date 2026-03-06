@@ -415,8 +415,13 @@ class OrderExecutor(BaseAgent):
 
         managed = self._orders.get(client_id)
         if managed is None:
-            self._deferred_fills.append(msg)
-            self.log.debug("Deferred fill (no mapping yet): {}", msg.get("order_id"))
+            retries = msg.get("_retries", 0)
+            if retries < 3:
+                msg["_retries"] = retries + 1
+                self._deferred_fills.append(msg)
+                self.log.debug("Deferred fill (no mapping yet, attempt {}): {}", retries + 1, msg.get("order_id"))
+            else:
+                self.log.warning("Dropping orphaned fill after 3 retries: {}", msg.get("order_id"))
             return
 
         fill_count = int(msg.get("count", 0))

@@ -245,7 +245,7 @@ class TestReallocation:
         )
         quant._portfolio = make_portfolio_state(bankroll=0.01, positions=[pos])
         quant._markets["NBA-YES-OTHER"] = make_market_state(
-            ticker="NBA-YES-OTHER", yes_bid=70, yes_ask=72
+            ticker="NBA-YES-OTHER", yes_bid=5, yes_ask=7
         )
 
         await quant._evaluate_all()
