@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from core.schemas import GameState, MarketState, Signal
+from core.utils import MINUTES_PER_QUARTER, team_minutes_played
 
 
 class BaseStrategy(ABC):
@@ -22,3 +23,27 @@ class BaseStrategy(ABC):
     @abstractmethod
     def evaluate(self, game: GameState, market: MarketState) -> Signal | None:
         """Return a Signal if a +EV edge is found, else None."""
+
+    @staticmethod
+    def time_adjusted_ev_threshold(
+        base_threshold: float,
+        game: GameState,
+        quarter_multipliers: tuple[float, float, float, float] = (2.5, 1.75, 1.25, 0.75),
+    ) -> float:
+        """Piecewise-linear EV threshold that interpolates within each quarter.
+
+        ``quarter_multipliers`` maps Q1..Q4 start-of-quarter multipliers.
+        Within each quarter the multiplier decays linearly toward the next
+        quarter's value.  Overtime clamps to Q4's floor.
+        """
+        elapsed = team_minutes_played(game)
+        qi = int(elapsed // MINUTES_PER_QUARTER)  # 0-based quarter index
+
+        if qi >= 3:
+            return base_threshold * quarter_multipliers[3]
+
+        frac = (elapsed - qi * MINUTES_PER_QUARTER) / MINUTES_PER_QUARTER
+        m_start = quarter_multipliers[qi]
+        m_end = quarter_multipliers[qi + 1]
+        multiplier = m_start + frac * (m_end - m_start)
+        return base_threshold * multiplier

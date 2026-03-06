@@ -5,6 +5,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
+import asyncpg
 from loguru import logger
 
 from core.base_agent import BaseAgent
@@ -70,6 +71,18 @@ class OrderExecutor(BaseAgent):
         # Daily P&L tracking
         self._daily_realized_pnl: float = 0.0
         self._kill_switch_tripped: bool = False
+
+        # Starting bankroll snapshot for session drawdown calculation
+        self._starting_bankroll: float = 0.0
+
+        # Track which entry orders came from flash_crash (for hard stop timer)
+        self._flash_crash_entries: set[str] = set()
+
+        # Hard stop timeout tracking: exit client_order_id -> asyncio.Task
+        self._hard_stop_tasks: dict[str, asyncio.Task] = {}
+
+        # Postgres pool for drawdown queries (lazily initialized)
+        self._pg_pool: asyncpg.Pool | None = None
 
     # ------------------------------------------------------------------
     # Startup reconciliation — crash-only architecture
@@ -182,18 +195,29 @@ class OrderExecutor(BaseAgent):
     async def run(self) -> None:
         self.log.info("Booting Executor — synchronizing state with Kalshi")
         await self._reconcile_state_on_boot()
+        self._starting_bankroll = self.current_bankroll
         self.log.info(
-            "State synced. {} resting orders recovered.", len(self._orders)
+            "State synced. {} resting orders recovered (starting bankroll=${:.2f}).",
+            len(self._orders), self._starting_bankroll,
         )
+
+        try:
+            self._pg_pool = await asyncpg.create_pool(
+                self.settings.DATABASE_URL, min_size=1, max_size=2,
+            )
+        except Exception:
+            self.log.warning("Postgres pool init failed — drawdown kill switch disabled")
 
         balance_task = asyncio.create_task(self._balance_poll_loop())
         signal_task = asyncio.create_task(
             self.bus.subscribe(
-                ["signal:validated", "signal:reallocate"], self._on_signal
+                ["signal:validated", "signal:reallocate", "SYSTEM:HALT"],
+                self._on_signal,
             )
         )
         gc_task = asyncio.create_task(self._gc_loop())
-        await asyncio.gather(balance_task, signal_task, gc_task)
+        drawdown_task = asyncio.create_task(self._drawdown_check_loop())
+        await asyncio.gather(balance_task, signal_task, gc_task, drawdown_task)
 
     # ------------------------------------------------------------------
     # Background bankroll cache
@@ -284,6 +308,13 @@ class OrderExecutor(BaseAgent):
     # ------------------------------------------------------------------
 
     async def _on_signal(self, _channel: str, data: dict[str, Any]) -> None:
+        if _channel == "SYSTEM:HALT":
+            self.log.critical("SYSTEM:HALT received — engaging kill switch")
+            self._kill_switch_tripped = True
+            await self._cancel_all_resting()
+            await self._send_telegram_alert()
+            return
+
         try:
             signal = Signal.model_validate(data)
         except Exception:
@@ -304,6 +335,11 @@ class OrderExecutor(BaseAgent):
     # ------------------------------------------------------------------
 
     async def _execute_entry(self, signal: Signal) -> None:
+        if not await self._velocity_check(signal.ticker):
+            self.log.info("Velocity breaker: {} exceeded {}/{} s", signal.ticker,
+                          self.settings.VELOCITY_MAX_TRADES, self.settings.VELOCITY_WINDOW_SECONDS)
+            return
+
         count = self._kelly_size(signal)
         if count < 1:
             self.log.info("Kelly size < 1 contract, skipping {}", signal.ticker)
@@ -324,6 +360,7 @@ class OrderExecutor(BaseAgent):
             order=order,
             state=OrderState.PLACED,
             signal_id=signal.signal_id,
+            is_exit=False,
         )
         self._orders[order.client_order_id] = managed
 
@@ -336,14 +373,17 @@ class OrderExecutor(BaseAgent):
             managed.kalshi_order_id = kalshi_id
             self._kalshi_to_client[kalshi_id] = order.client_order_id
             self.log.info(
-                "Entry placed: {} {} x{} @{} (kalshi_id={})",
-                signal.ticker, signal.side, count, entry_price, kalshi_id,
+                "Entry placed: {} {} x{} @{} (kalshi_id={}) [source={}]",
+                signal.ticker, signal.side, count, entry_price, kalshi_id, signal.source,
             )
         except Exception:
             self.log.exception("Failed to place entry for {}", signal.ticker)
             managed.state = OrderState.CANCELED
             self.current_bankroll += bet_dollars
             return
+
+        if signal.source == "flash_crash":
+            self._flash_crash_entries.add(order.client_order_id)
 
         await self._replay_deferred_fills()
 
@@ -484,9 +524,13 @@ class OrderExecutor(BaseAgent):
         )
 
         if managed.is_exit:
+            stop_task = self._hard_stop_tasks.pop(client_id, None)
+            if stop_task and not stop_task.done():
+                stop_task.cancel()
             await self._trade_complete(managed, fill_count, fill_price)
         elif fill_count > 0:
-            await self._place_exit(managed, fill_count)
+            source = "flash_crash" if managed.order.client_order_id in self._flash_crash_entries else ""
+            await self._place_exit(managed, fill_count, source=source)
 
     async def _replay_deferred_fills(self) -> None:
         """Replay any fills that arrived before place_order returned."""
@@ -527,11 +571,17 @@ class OrderExecutor(BaseAgent):
     # Exit order (only after fill confirms inventory)
     # ------------------------------------------------------------------
 
-    async def _place_exit(self, entry: ManagedOrder, batch_count: int) -> None:
+    async def _place_exit(
+        self, entry: ManagedOrder, batch_count: int, *, source: str = "",
+    ) -> None:
         """Place a paired limit sell for a specific fill batch.
 
         Called on every fill event, not just full fill, so partial fills
         are hedged immediately instead of waiting for the full order.
+
+        For flash_crash entries, a hard stop timer is started: if the exit
+        hasn't filled within FLASH_CRASH_HARD_STOP_TIMEOUT seconds, it is
+        canceled and replaced with a market sell.
         """
         exit_price = entry.order.yes_price or entry.order.no_price or 0
         exit_price += self.settings.TARGET_EXIT_SPREAD - self.settings.SLIPPAGE_TICKS
@@ -567,6 +617,15 @@ class OrderExecutor(BaseAgent):
         except Exception:
             self.log.exception("Failed to place exit for {} — queueing for retry", exit_order.ticker)
             self._failed_exits.append(exit_managed)
+
+        if source == "flash_crash":
+            task = asyncio.create_task(
+                self._hard_stop_timer(exit_order.client_order_id)
+            )
+            self._hard_stop_tasks[exit_order.client_order_id] = task
+            task.add_done_callback(
+                lambda t: self._hard_stop_tasks.pop(exit_order.client_order_id, None)
+            )
 
         await self._replay_deferred_fills()
 
@@ -687,13 +746,15 @@ class OrderExecutor(BaseAgent):
             self.log.exception("Failed to send Telegram alert")
 
     # ------------------------------------------------------------------
-    # Kelly criterion sizing
+    # Kelly criterion sizing (dynamic per strategy source)
     # ------------------------------------------------------------------
 
     def _kelly_size(self, signal: Signal) -> int:
-        """Fractional Kelly Criterion: f* = (p*b - q) / b, scaled by fraction.
+        """Fractional Kelly Criterion with dynamic fraction per strategy source.
 
-        Uses self.current_bankroll (background-cached, no REST call here).
+        flash_crash signals use CRASH_KELLY_FRACTION (0.1 = 1/10 Kelly)
+        to limit exposure to unmodeled events.  All other quant strategies
+        use QUANT_KELLY_FRACTION (0.5 = half Kelly).
         """
         if self.current_bankroll <= 0:
             return 0
@@ -704,13 +765,136 @@ class OrderExecutor(BaseAgent):
 
         p = signal.confidence
         q = 1.0 - p
-        b = (100.0 - entry_cents) / entry_cents  # payout odds
+        b = (100.0 - entry_cents) / entry_cents
 
         kelly_full = (p * b - q) / b if b > 0 else 0
-        kelly_fraction = max(kelly_full * self.settings.KELLY_FRACTION, 0)
+
+        if signal.source == "flash_crash":
+            fraction = self.settings.CRASH_KELLY_FRACTION
+        else:
+            fraction = self.settings.QUANT_KELLY_FRACTION
+        kelly_fraction = max(kelly_full * fraction, 0)
 
         bankroll_cents = self.current_bankroll * 100
         bet_cents = kelly_fraction * bankroll_cents
         count = math.floor(bet_cents / entry_cents)
 
         return max(count, 0)
+
+    # ------------------------------------------------------------------
+    # Velocity circuit breaker (Redis INCR + TTL)
+    # ------------------------------------------------------------------
+
+    async def _velocity_check(self, ticker: str) -> bool:
+        """Return True if the trade is allowed under the velocity limit."""
+        try:
+            key = f"velocity:{ticker}"
+            count = await self.bus.redis.incr(key)
+            if count == 1:
+                await self.bus.redis.expire(key, self.settings.VELOCITY_WINDOW_SECONDS)
+            return count <= self.settings.VELOCITY_MAX_TRADES
+        except Exception:
+            self.log.warning("Velocity check failed for {} — allowing trade", ticker)
+            return True
+
+    # ------------------------------------------------------------------
+    # Hard stop timer (flash crash asymmetric stop-loss)
+    # ------------------------------------------------------------------
+
+    async def _hard_stop_timer(self, exit_client_id: str) -> None:
+        """Wait HARD_STOP_TIMEOUT, then cancel + market-sell if unfilled."""
+        try:
+            await asyncio.sleep(self.settings.FLASH_CRASH_HARD_STOP_TIMEOUT)
+        except asyncio.CancelledError:
+            return
+
+        managed = self._orders.get(exit_client_id)
+        if managed is None or managed.state in (OrderState.FILLED, OrderState.CANCELED):
+            return
+
+        self.log.warning(
+            "HARD STOP: exit {} unfilled after {}s — canceling and market-selling",
+            exit_client_id, self.settings.FLASH_CRASH_HARD_STOP_TIMEOUT,
+        )
+
+        if managed.kalshi_order_id:
+            try:
+                await self.client.cancel_order(managed.kalshi_order_id)
+                managed.state = OrderState.CANCELED
+            except Exception:
+                self.log.exception("Hard stop: failed to cancel {}", managed.kalshi_order_id)
+                return
+
+        remaining = managed.order.count - managed.fill_count
+        if remaining <= 0:
+            return
+
+        market_sell = Order(
+            ticker=managed.order.ticker,
+            action=Action.SELL,
+            side=managed.order.side,
+            count=remaining,
+            yes_price=1 if managed.order.side == Side.YES else None,
+            no_price=1 if managed.order.side == Side.NO else None,
+        )
+
+        sell_managed = ManagedOrder(
+            order=market_sell,
+            state=OrderState.PLACED,
+            signal_id=managed.signal_id,
+            is_exit=True,
+            parent_entry_id=managed.parent_entry_id,
+        )
+        self._orders[market_sell.client_order_id] = sell_managed
+
+        try:
+            resp = await self.client.place_order(market_sell)
+            kalshi_id = resp.get("order", {}).get("order_id", "")
+            sell_managed.kalshi_order_id = kalshi_id
+            self._kalshi_to_client[kalshi_id] = market_sell.client_order_id
+            self.log.warning(
+                "HARD STOP: market sell placed {} x{} @1c (kalshi={})",
+                market_sell.ticker, remaining, kalshi_id,
+            )
+        except Exception:
+            self.log.exception("HARD STOP: failed to place market sell")
+            self._failed_exits.append(sell_managed)
+
+    # ------------------------------------------------------------------
+    # Global drawdown kill switch (Postgres session PnL)
+    # ------------------------------------------------------------------
+
+    async def _drawdown_check_loop(self) -> None:
+        """Periodically query Postgres for session PnL and halt if breached."""
+        while self._running:
+            await asyncio.sleep(30)
+            if self._kill_switch_tripped or self._pg_pool is None:
+                continue
+            if self._starting_bankroll <= 0:
+                continue
+
+            try:
+                async with self._pg_pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        """SELECT COALESCE(SUM(pnl_dollars), 0) AS total_pnl
+                           FROM trades
+                           WHERE created_at >= CURRENT_DATE
+                             AND status = 'EXECUTED'"""
+                    )
+                session_pnl = float(row["total_pnl"]) if row else 0.0
+            except Exception:
+                self.log.debug("Drawdown check: Postgres query failed — skipping")
+                continue
+
+            if session_pnl >= 0:
+                continue
+
+            drawdown_pct = abs(session_pnl) / self._starting_bankroll
+            if drawdown_pct >= self.settings.MAX_SESSION_DRAWDOWN_PCT:
+                self.log.critical(
+                    "DRAWDOWN KILL: session PnL=${:.2f} ({:.1f}% of ${:.2f}) exceeds {:.0f}% limit",
+                    session_pnl, drawdown_pct * 100,
+                    self._starting_bankroll,
+                    self.settings.MAX_SESSION_DRAWDOWN_PCT * 100,
+                )
+                await self.bus.publish("SYSTEM:HALT", {"reason": "session_drawdown"})

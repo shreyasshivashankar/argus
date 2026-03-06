@@ -35,10 +35,12 @@ class TotalsStrategy(BaseStrategy):
         ev_threshold: float = 0.03,
         target_exit_spread: int = 7,
         min_minutes: float = 6.0,
+        quarter_multipliers: tuple[float, float, float, float] = (2.5, 1.75, 1.25, 0.75),
     ) -> None:
         self._ev_threshold = ev_threshold
         self._target_exit_spread = target_exit_spread
         self._min_minutes = min_minutes
+        self._quarter_multipliers = quarter_multipliers
 
     # ------------------------------------------------------------------
     # Filter
@@ -80,7 +82,10 @@ class TotalsStrategy(BaseStrategy):
         entry_price_cents = market.yes_ask
         ev = model_prob * 1.0 - (entry_price_cents / 100.0)
 
-        if ev < self._ev_threshold:
+        threshold = self.time_adjusted_ev_threshold(
+            self._ev_threshold, game, self._quarter_multipliers,
+        )
+        if ev < threshold:
             return None
 
         exit_price = min(entry_price_cents + self._target_exit_spread, 99)

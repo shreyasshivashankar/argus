@@ -30,9 +30,11 @@ class MoneylineStrategy(BaseStrategy):
         self,
         ev_threshold: float = 0.03,
         target_exit_spread: int = 7,
+        quarter_multipliers: tuple[float, float, float, float] = (2.5, 1.75, 1.25, 0.75),
     ) -> None:
         self._ev_threshold = ev_threshold
         self._target_exit_spread = target_exit_spread
+        self._quarter_multipliers = quarter_multipliers
         self._reversal_table: dict[tuple[int, int], float] = {}
 
     # ------------------------------------------------------------------
@@ -56,7 +58,10 @@ class MoneylineStrategy(BaseStrategy):
         entry_price_cents = market.yes_ask
         ev = model_prob * 1.0 - (entry_price_cents / 100.0)
 
-        if ev < self._ev_threshold:
+        threshold = self.time_adjusted_ev_threshold(
+            self._ev_threshold, game, self._quarter_multipliers,
+        )
+        if ev < threshold:
             return None
 
         exit_price = min(entry_price_cents + self._target_exit_spread, 99)

@@ -1,6 +1,7 @@
 """Tests for OrderExecutor: Kelly sizing, kill switch, fill lifecycle, VWAP, GC, reallocation."""
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
@@ -45,7 +46,7 @@ class TestKellySize:
     def test_known_calculation(self, executor):
         """Verify the math for a specific case.
 
-        confidence=0.7, entry_price=20, bankroll=$1000, KELLY_FRACTION=0.5
+        confidence=0.7, entry_price=20, bankroll=$1000, QUANT_KELLY_FRACTION=0.5
         b = (100-20)/20 = 4.0
         kelly_full = (0.7*4 - 0.3)/4 = (2.8-0.3)/4 = 0.625
         kelly_fraction = 0.625 * 0.5 = 0.3125
@@ -54,17 +55,17 @@ class TestKellySize:
         count = floor(31250/20) = 1562
         """
         executor.current_bankroll = 1000.0
-        executor.settings.KELLY_FRACTION = 0.5
+        executor.settings.QUANT_KELLY_FRACTION = 0.5
         sig = make_signal(confidence=0.7, entry_price=20)
         result = executor._kelly_size(sig)
         assert result == 1562
 
     def test_fraction_scaling(self, executor):
-        """Halving KELLY_FRACTION should halve the position size."""
+        """Halving QUANT_KELLY_FRACTION should halve the position size."""
         sig = make_signal(confidence=0.7, entry_price=20)
-        executor.settings.KELLY_FRACTION = 1.0
+        executor.settings.QUANT_KELLY_FRACTION = 1.0
         size_full = executor._kelly_size(sig)
-        executor.settings.KELLY_FRACTION = 0.5
+        executor.settings.QUANT_KELLY_FRACTION = 0.5
         size_half = executor._kelly_size(sig)
         assert size_half == math.floor(size_full / 2) or abs(size_half - size_full // 2) <= 1
 
@@ -432,3 +433,211 @@ class TestReallocate:
         assert executor._orders["exit-A"].state == OrderState.RESTING
         assert executor._orders["exit-B"].state == OrderState.CANCELED
         assert executor._orders["exit-C"].state == OrderState.RESTING
+
+
+# ===========================================================================
+# Dynamic Kelly sizing (QUANT vs CRASH)
+# ===========================================================================
+
+class TestDynamicKelly:
+
+    def test_quant_signal_uses_quant_fraction(self, executor):
+        executor.current_bankroll = 1000.0
+        executor.settings.QUANT_KELLY_FRACTION = 0.5
+        executor.settings.CRASH_KELLY_FRACTION = 0.1
+        sig = make_signal(confidence=0.7, entry_price=20, source="moneyline")
+        size_quant = executor._kelly_size(sig)
+
+        sig_crash = make_signal(confidence=0.7, entry_price=20, source="flash_crash")
+        size_crash = executor._kelly_size(sig_crash)
+
+        assert size_quant > 0
+        assert size_crash > 0
+        assert size_crash < size_quant
+        assert size_crash == pytest.approx(size_quant * 0.2, abs=2)
+
+    def test_crash_kelly_tenth_of_full(self, executor):
+        """CRASH_KELLY=0.1 should be ~1/5 of QUANT_KELLY=0.5."""
+        executor.current_bankroll = 1000.0
+        executor.settings.QUANT_KELLY_FRACTION = 0.5
+        executor.settings.CRASH_KELLY_FRACTION = 0.1
+        sig = make_signal(confidence=0.8, entry_price=30, source="flash_crash")
+        size = executor._kelly_size(sig)
+        assert size > 0
+
+        sig_full = make_signal(confidence=0.8, entry_price=30, source="totals")
+        size_full = executor._kelly_size(sig_full)
+        ratio = size / size_full
+        assert 0.15 < ratio < 0.25
+
+
+# ===========================================================================
+# Velocity circuit breaker
+# ===========================================================================
+
+class TestVelocityBreaker:
+
+    @pytest.mark.asyncio
+    async def test_first_trade_allowed(self, executor):
+        executor.bus.redis.incr = AsyncMock(return_value=1)
+        assert await executor._velocity_check("TICKER-A") is True
+
+    @pytest.mark.asyncio
+    async def test_second_trade_allowed(self, executor):
+        executor.bus.redis.incr = AsyncMock(return_value=2)
+        assert await executor._velocity_check("TICKER-A") is True
+
+    @pytest.mark.asyncio
+    async def test_third_trade_blocked(self, executor):
+        executor.bus.redis.incr = AsyncMock(return_value=3)
+        assert await executor._velocity_check("TICKER-A") is False
+
+    @pytest.mark.asyncio
+    async def test_redis_failure_allows_trade(self, executor):
+        executor.bus.redis.incr = AsyncMock(side_effect=Exception("connection reset"))
+        assert await executor._velocity_check("TICKER-A") is True
+
+    @pytest.mark.asyncio
+    async def test_velocity_blocks_entry(self, executor):
+        """When velocity limit exceeded, entry is not placed."""
+        executor.bus.redis.incr = AsyncMock(return_value=3)
+        sig = make_signal(confidence=0.7, entry_price=20)
+        sig_data = sig.model_dump(mode="json")
+        await executor._on_signal("signal:validated", sig_data)
+        executor.client.place_order.assert_not_called()
+
+
+# ===========================================================================
+# Hard stop timeout (flash crash asymmetric exit)
+# ===========================================================================
+
+class TestHardStop:
+
+    @pytest.mark.asyncio
+    async def test_hard_stop_cancels_and_market_sells(self, executor):
+        """After timeout, unfilled exit is canceled and replaced with 1c sell."""
+        exit_order = make_order(
+            action=Action.SELL, count=10, yes_price=45, client_order_id="exit-fc"
+        )
+        exit_managed = make_managed_order(
+            order=exit_order, state=OrderState.RESTING, is_exit=True,
+            parent_entry_id="entry-fc",
+        )
+        exit_managed.kalshi_order_id = "kalshi-exit-fc"
+        executor._orders["exit-fc"] = exit_managed
+
+        executor.settings.FLASH_CRASH_HARD_STOP_TIMEOUT = 0.05
+
+        task = asyncio.create_task(executor._hard_stop_timer("exit-fc"))
+        await asyncio.sleep(0.15)
+
+        executor.client.cancel_order.assert_called_once_with("kalshi-exit-fc")
+        assert exit_managed.state == OrderState.CANCELED
+        executor.client.place_order.assert_called_once()
+        placed = executor.client.place_order.call_args[0][0]
+        assert placed.action == Action.SELL
+        assert placed.yes_price == 1
+        assert placed.count == 10
+
+    @pytest.mark.asyncio
+    async def test_hard_stop_canceled_on_fill(self, executor):
+        """If exit fills before timeout, the timer task is canceled."""
+        exit_order = make_order(
+            action=Action.SELL, count=10, yes_price=45, client_order_id="exit-fc2"
+        )
+        exit_managed = make_managed_order(
+            order=exit_order, state=OrderState.RESTING, is_exit=True,
+            parent_entry_id="entry-fc2",
+        )
+        exit_managed.remaining_count = 10
+        executor._orders["exit-fc2"] = exit_managed
+
+        executor.settings.FLASH_CRASH_HARD_STOP_TIMEOUT = 5
+
+        task = asyncio.create_task(executor._hard_stop_timer("exit-fc2"))
+        executor._hard_stop_tasks["exit-fc2"] = task
+
+        entry_order = make_order(count=10, yes_price=40, client_order_id="entry-fc2")
+        entry = make_managed_order(order=entry_order, state=OrderState.FILLED)
+        entry.fill_count = 10
+        entry.vwap_cents = 40.0
+        executor._orders["entry-fc2"] = entry
+
+        await executor.on_fill({
+            "client_order_id": "exit-fc2",
+            "count": 10,
+            "yes_price": 45,
+        })
+
+        await asyncio.sleep(0)
+        assert task.cancelled() or task.done()
+        executor.client.cancel_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_hard_stop_noop_if_already_filled(self, executor):
+        """Timer fires but order is already filled → no action."""
+        exit_order = make_order(
+            action=Action.SELL, count=10, yes_price=45, client_order_id="exit-done"
+        )
+        exit_managed = make_managed_order(
+            order=exit_order, state=OrderState.FILLED, is_exit=True,
+        )
+        executor._orders["exit-done"] = exit_managed
+
+        executor.settings.FLASH_CRASH_HARD_STOP_TIMEOUT = 0.01
+        await executor._hard_stop_timer("exit-done")
+
+        executor.client.cancel_order.assert_not_called()
+        executor.client.place_order.assert_not_called()
+
+
+# ===========================================================================
+# SYSTEM:HALT channel
+# ===========================================================================
+
+class TestSystemHalt:
+
+    @pytest.mark.asyncio
+    async def test_halt_trips_kill_switch(self, executor):
+        with patch.object(executor, "_cancel_all_resting", new_callable=AsyncMock), \
+             patch.object(executor, "_send_telegram_alert", new_callable=AsyncMock):
+            await executor._on_signal("SYSTEM:HALT", {"reason": "session_drawdown"})
+
+        assert executor._kill_switch_tripped is True
+
+    @pytest.mark.asyncio
+    async def test_halt_drops_subsequent_signals(self, executor):
+        with patch.object(executor, "_cancel_all_resting", new_callable=AsyncMock), \
+             patch.object(executor, "_send_telegram_alert", new_callable=AsyncMock):
+            await executor._on_signal("SYSTEM:HALT", {"reason": "test"})
+
+        sig = make_signal()
+        sig_data = sig.model_dump(mode="json")
+        await executor._on_signal("signal:validated", sig_data)
+        executor.client.place_order.assert_not_called()
+
+
+# ===========================================================================
+# Flash crash entry tagging
+# ===========================================================================
+
+class TestFlashCrashEntryTagging:
+
+    @pytest.mark.asyncio
+    async def test_flash_crash_entry_tagged(self, executor):
+        sig = make_signal(confidence=0.7, entry_price=20, source="flash_crash")
+        sig_data = sig.model_dump(mode="json")
+        await executor._on_signal("signal:validated", sig_data)
+
+        executor.client.place_order.assert_called_once()
+        placed_order = executor.client.place_order.call_args[0][0]
+        assert placed_order.client_order_id in executor._flash_crash_entries
+
+    @pytest.mark.asyncio
+    async def test_quant_entry_not_tagged(self, executor):
+        sig = make_signal(confidence=0.7, entry_price=20, source="moneyline")
+        sig_data = sig.model_dump(mode="json")
+        await executor._on_signal("signal:validated", sig_data)
+
+        executor.client.place_order.assert_called_once()
+        assert len(executor._flash_crash_entries) == 0

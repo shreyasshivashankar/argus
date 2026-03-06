@@ -236,7 +236,14 @@ class AppSettings(BaseSettings):
     CONTEXT_TTL: int = 300
 
     # EV threshold (cents) — only fire on large mispricings (retail data delay)
-    EV_THRESHOLD: float = 6.0
+    EV_THRESHOLD: float = 4.0  # Legacy fallback; new code uses BASE_EV_THRESHOLD
+
+    # Dynamic volatility scaling: piecewise per-quarter multipliers
+    BASE_EV_THRESHOLD: float = 4.0
+    EV_Q1_MULTIPLIER: float = 2.5    # Q1: requires 10.0c edge
+    EV_Q2_MULTIPLIER: float = 1.75   # Q2: requires 7.0c edge
+    EV_Q3_MULTIPLIER: float = 1.25   # Q3: requires 5.0c edge
+    EV_Q4_MULTIPLIER: float = 0.75   # Q4: requires 3.0c edge
 
     # Order GC: how often to sweep (seconds) and max age of terminal orders (seconds)
     ORDER_GC_INTERVAL: float = 300.0
@@ -247,6 +254,27 @@ class AppSettings(BaseSettings):
     FOREGONE_PROFIT_MULTIPLIER: float = 0.5  # Discount resting exit profit (not guaranteed)
     REALLOCATE_DECAY_MINUTES: float = 120.0  # Time to decay hurdle to floor
     REALLOCATE_DECAY_FLOOR: float = 0.2  # Min foregone multiplier (most aggressive)
+
+    # Flash crash liquidity snatcher
+    FLASH_CRASH_WINDOW_SECONDS: float = 10.0
+    FLASH_CRASH_DROP_CENTS: int = 20
+    FLASH_CRASH_EXIT_SPREAD: int = 6  # TARGET_BOUNCE: +6 cents
+    FLASH_CRASH_MIN_PRICE: int = 15
+    FLASH_CRASH_SCORE_DELTA_LIMIT: int = 3  # Abort if opponent run > 3 pts
+
+    # Dynamic Kelly sizing per strategy type
+    QUANT_KELLY_FRACTION: float = 0.5   # Half-Kelly for standard quant strategies
+    CRASH_KELLY_FRACTION: float = 0.1   # 1/10-Kelly for flash crash (unmodeled risk)
+
+    # Velocity circuit breaker (per-ticker)
+    VELOCITY_MAX_TRADES: int = 2
+    VELOCITY_WINDOW_SECONDS: int = 60
+
+    # Asymmetric stop-loss / take-profit for flash crash
+    FLASH_CRASH_HARD_STOP_TIMEOUT: int = 180  # 3 min → market sell if no fill
+
+    # Global drawdown kill switch (Postgres session PnL)
+    MAX_SESSION_DRAWDOWN_PCT: float = 0.10  # 10% of starting daily bankroll
 
     # Trade database (Postgres)
     DATABASE_URL: str = "postgresql://argus:argus@localhost:5432/argus"

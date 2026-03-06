@@ -17,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from agents.strategies import MoneylineStrategy, PlayerPropStrategy, TotalsStrategy
+from agents.strategies import FlashCrashStrategy, MoneylineStrategy, PlayerPropStrategy, TotalsStrategy
 from agents.strategies.base import BaseStrategy
 from core.base_agent import BaseAgent
 from core.bus import SignalBus
@@ -52,18 +52,36 @@ class NBAQuantAgent(BaseAgent):
     ) -> None:
         super().__init__("nba_quant", settings, bus, client)
 
+        ev_base = settings.BASE_EV_THRESHOLD / 100.0
+        q_mults = (
+            settings.EV_Q1_MULTIPLIER,
+            settings.EV_Q2_MULTIPLIER,
+            settings.EV_Q3_MULTIPLIER,
+            settings.EV_Q4_MULTIPLIER,
+        )
+
         self._strategies: list[BaseStrategy] = strategies or [
             MoneylineStrategy(
-                ev_threshold=settings.EV_THRESHOLD / 100.0,
+                ev_threshold=ev_base,
                 target_exit_spread=settings.TARGET_EXIT_SPREAD,
+                quarter_multipliers=q_mults,
             ),
             TotalsStrategy(
-                ev_threshold=settings.EV_THRESHOLD / 100.0,
+                ev_threshold=ev_base,
                 target_exit_spread=settings.TARGET_EXIT_SPREAD,
+                quarter_multipliers=q_mults,
             ),
             PlayerPropStrategy(
-                ev_threshold=settings.EV_THRESHOLD / 100.0,
+                ev_threshold=ev_base,
                 target_exit_spread=settings.TARGET_EXIT_SPREAD,
+                quarter_multipliers=q_mults,
+            ),
+            FlashCrashStrategy(
+                window_seconds=settings.FLASH_CRASH_WINDOW_SECONDS,
+                drop_threshold_cents=settings.FLASH_CRASH_DROP_CENTS,
+                exit_spread=settings.FLASH_CRASH_EXIT_SPREAD,
+                min_price_cents=settings.FLASH_CRASH_MIN_PRICE,
+                score_delta_limit=settings.FLASH_CRASH_SCORE_DELTA_LIMIT,
             ),
         ]
 

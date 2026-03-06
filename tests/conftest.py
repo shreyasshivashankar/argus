@@ -44,14 +44,21 @@ def settings() -> AppSettings:
         DAILY_STOP_LOSS_USD=50.0,
         SLIPPAGE_TICKS=2,
         KELLY_FRACTION=0.5,
+        QUANT_KELLY_FRACTION=0.5,
+        CRASH_KELLY_FRACTION=0.1,
         TARGET_EXIT_SPREAD=7,
         CONTEXT_POLL_INTERVAL=15.0,
         BALANCE_POLL_INTERVAL=10.0,
         HEARTBEAT_INTERVAL=30.0,
         CONTEXT_TTL=300,
-        EV_THRESHOLD=3.0,
+        EV_THRESHOLD=4.0,
+        BASE_EV_THRESHOLD=4.0,
         ORDER_GC_INTERVAL=300.0,
         ORDER_GC_TTL=7200.0,
+        VELOCITY_MAX_TRADES=2,
+        VELOCITY_WINDOW_SECONDS=60,
+        FLASH_CRASH_HARD_STOP_TIMEOUT=180,
+        MAX_SESSION_DRAWDOWN_PCT=0.10,
     )
 
 
@@ -67,6 +74,12 @@ def mock_bus() -> AsyncMock:
     bus.get_context = AsyncMock(return_value=(ContextStatus.SAFE, ""))
     bus.set_context = AsyncMock()
     bus.close = AsyncMock()
+
+    mock_redis = AsyncMock()
+    mock_redis.incr = AsyncMock(return_value=1)
+    mock_redis.expire = AsyncMock()
+    bus.redis = mock_redis
+
     return bus
 
 
@@ -102,6 +115,7 @@ def make_signal(
     game_id: str = "game-001",
     ev_estimate: float = 0.05,
     status: SignalStatus = SignalStatus.VALIDATED,
+    source: str = "test",
 ) -> Signal:
     return Signal(
         ticker=ticker,
@@ -109,7 +123,7 @@ def make_signal(
         side=Side.YES,
         status=status,
         confidence=confidence,
-        source="test",
+        source=source,
         ev_estimate=ev_estimate,
         entry_price=entry_price,
         exit_price=exit_price,
