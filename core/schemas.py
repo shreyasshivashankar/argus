@@ -160,6 +160,7 @@ class ManagedOrder(BaseModel):
     parent_entry_id: Optional[str] = None
     vwap_cents: float = 0.0
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class PortfolioPosition(BaseModel):

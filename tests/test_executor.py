@@ -95,7 +95,7 @@ class TestKillSwitch:
     @pytest.mark.asyncio
     async def test_loss_exceeds_threshold_trips(self, executor):
         executor._daily_realized_pnl = -60.0  # threshold is 50
-        with patch.object(executor, "_cancel_all_resting", new_callable=AsyncMock) as mock_cancel, \
+        with patch.object(executor, "_cancel_resting_entries", new_callable=AsyncMock) as mock_cancel, \
              patch.object(executor, "_send_telegram_alert", new_callable=AsyncMock) as mock_alert:
             await executor._check_kill_switch()
         assert executor._kill_switch_tripped

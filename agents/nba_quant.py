@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from loguru import logger
@@ -82,6 +82,9 @@ class NBAQuantAgent(BaseAgent):
 
         # Per-ticker cooldown
         self._signal_cooldowns: dict[str, datetime] = {}
+
+        # Brief global pause after reallocation to let exchange cash settle
+        self._global_realloc_lock: datetime | None = None
 
     # ------------------------------------------------------------------
     # Main loop
@@ -207,12 +210,15 @@ class NBAQuantAgent(BaseAgent):
             )
             return True
 
+        if self._global_realloc_lock and now < self._global_realloc_lock:
+            return False
+
         reallocated = await self._try_reallocate(
             signal.ev_estimate, entry_price_cents,
             signal.confidence, self._markets[signal.ticker], game,
         )
         if reallocated:
-            self._signal_cooldowns[signal.ticker] = now
+            self._global_realloc_lock = now + timedelta(seconds=3)
         return reallocated
 
     # ------------------------------------------------------------------

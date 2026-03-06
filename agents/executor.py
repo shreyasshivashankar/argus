@@ -270,7 +270,7 @@ class OrderExecutor(BaseAgent):
             stale = [
                 cid for cid, m in self._orders.items()
                 if m.state in terminal_states
-                and (now - m.created_at).total_seconds() > self.settings.ORDER_GC_TTL
+                and (now - m.updated_at).total_seconds() > self.settings.ORDER_GC_TTL
             ]
             for cid in stale:
                 managed = self._orders.pop(cid, None)
@@ -475,6 +475,7 @@ class OrderExecutor(BaseAgent):
             managed.state = OrderState.FILLED
         else:
             managed.state = OrderState.PARTIALLY_FILLED
+        managed.updated_at = datetime.utcnow()
 
         self.log.info(
             "Fill on {}: +{} @{} (total filled={}/{}, vwap={:.1f})",
@@ -520,6 +521,7 @@ class OrderExecutor(BaseAgent):
                 cancel_ev.set()
             else:
                 self.log.warning("Order canceled by exchange: {}", order_id)
+        managed.updated_at = datetime.utcnow()
 
     # ------------------------------------------------------------------
     # Exit order (only after fill confirms inventory)
@@ -631,7 +633,7 @@ class OrderExecutor(BaseAgent):
                 abs(self._daily_realized_pnl),
                 self.settings.DAILY_STOP_LOSS_USD,
             )
-            await self._cancel_all_resting()
+            await self._cancel_resting_entries()
             await self._send_telegram_alert()
 
     async def _cancel_all_resting(self) -> None:
