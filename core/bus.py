@@ -66,9 +66,14 @@ class SignalBus:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Malformed message on {}: {}", channel, raw_message["data"])
                     continue
+                def _task_done(t: asyncio.Task) -> None:
+                    background_tasks.discard(t)
+                    if not t.cancelled() and t.exception():
+                        logger.exception("Bus callback error", exc_info=t.exception())
+
                 task = asyncio.create_task(callback(channel, data))
                 background_tasks.add(task)
-                task.add_done_callback(background_tasks.discard)
+                task.add_done_callback(_task_done)
         finally:
             await pubsub.unsubscribe(*channels)
             await pubsub.close()

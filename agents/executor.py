@@ -357,6 +357,7 @@ class OrderExecutor(BaseAgent):
 
         try:
             await asyncio.wait_for(cancel_event.wait(), timeout=5.0)
+            await asyncio.sleep(0.2)
         except asyncio.TimeoutError:
             self.log.warning(
                 "REALLOCATE: cancel confirm timed out for {} — proceeding anyway",
