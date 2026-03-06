@@ -131,6 +131,16 @@ class TheRundownFeed(SportsFeed):
             await self.bus.publish("signal:heartbeat", {"agent": "sports_feed"})
             await asyncio.sleep(30)
 
+    async def _game_state_broadcast_loop(self) -> None:
+        """Periodically publish game:state for live events so monitor stays updated."""
+        while self._running:
+            await asyncio.sleep(15)
+            for eid, ev in list(self._event_cache.items()):
+                if ev.get("score", {}).get("event_status") in _LIVE_STATUSES:
+                    gs = self._event_to_game_state(ev, eid)
+                    if gs:
+                        await self.bus.publish("game:state", gs)
+
     async def listen(self) -> AsyncIterator[GameState]:
         assert self._session is not None
 
@@ -142,6 +152,9 @@ class TheRundownFeed(SportsFeed):
         )
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(), name="tr_heartbeat"
+        )
+        broadcast_task = asyncio.create_task(
+            self._game_state_broadcast_loop(), name="tr_game_broadcast"
         )
 
         reconnect_delay = self.WS_RECONNECT_DELAY
@@ -177,8 +190,9 @@ class TheRundownFeed(SportsFeed):
         stats_task.cancel()
         event_refresh_task.cancel()
         heartbeat_task.cancel()
+        broadcast_task.cancel()
         await asyncio.gather(
-            stats_task, event_refresh_task, heartbeat_task,
+            stats_task, event_refresh_task, heartbeat_task, broadcast_task,
             return_exceptions=True,
         )
 
