@@ -90,6 +90,7 @@ class GameState(BaseModel):
     clock: str
     timestamp: datetime
     player_stats: list[PlayerBoxScore] = Field(default_factory=list)
+    recent_plays: list[str] = Field(default_factory=list)  # Play-by-play text for narrative
 
 
 class MarketState(BaseModel):

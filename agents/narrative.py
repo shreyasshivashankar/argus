@@ -211,16 +211,17 @@ class NarrativeAgent(BaseAgent):
     so no LLM latency ever enters the hot path.
     """
 
-    # Focused prompt template — kept tight so the LLM responds fast
+    # Focused prompt template — play-by-play gives LLM real data to parse
     _PROMPT_TEMPLATE = (
         "You are an NBA game context monitor for an automated trading system. "
         "For the game {home} vs {away} (currently Q{quarter}, {clock}):\n\n"
-        "Answer ONLY 'SAFE' unless you have SPECIFIC knowledge of a critical "
-        "negative event that happened in THIS game — such as a star player "
-        "injury, ejection, or technical foul on a key player.\n\n"
-        "If you do not have specific information about a negative event, "
-        "answer 'SAFE'. Do NOT speculate. Do NOT veto based on score or "
-        "general uncertainty.\n\n"
+        "Here are the most recent play-by-play events:\n"
+        "{recent_plays}\n\n"
+        "Answer ONLY 'SAFE' unless the play-by-play indicates a critical "
+        "negative event in THIS game — such as a star player injury, ejection, "
+        "or technical foul on a key player.\n\n"
+        "If the plays do not show a negative event, answer 'SAFE'. Do NOT "
+        "speculate. Do NOT veto based on score or general uncertainty.\n\n"
         "Your answer (SAFE or VETO: <reason>):"
     )
 
@@ -289,11 +290,14 @@ class NarrativeAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     async def _evaluate_context(self, game_id: str, game: dict) -> None:
+        plays = game.get("recent_plays") or []
+        recent_plays = "\n".join(plays) if plays else "No recent plays available."
         prompt = self._PROMPT_TEMPLATE.format(
             home=game.get("home_team", "?"),
             away=game.get("away_team", "?"),
             quarter=game.get("quarter", "?"),
             clock=game.get("clock", "?"),
+            recent_plays=recent_plays,
         )
 
         try:
