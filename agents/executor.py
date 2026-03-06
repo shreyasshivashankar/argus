@@ -300,6 +300,9 @@ class OrderExecutor(BaseAgent):
         )
         self._orders[order.client_order_id] = managed
 
+        bet_dollars = (count * entry_price) / 100.0
+        self.current_bankroll -= bet_dollars
+
         try:
             resp = await self.client.place_order(order)
             kalshi_id = resp.get("order", {}).get("order_id", "")
@@ -312,6 +315,7 @@ class OrderExecutor(BaseAgent):
         except Exception:
             self.log.exception("Failed to place entry for {}", signal.ticker)
             managed.state = OrderState.CANCELED
+            self.current_bankroll += bet_dollars
             return
 
         await self._replay_deferred_fills()
@@ -549,9 +553,15 @@ class OrderExecutor(BaseAgent):
             if entry:
                 entry_vwap = entry.vwap_cents
 
-        pnl_cents = (fill_price - entry_vwap) * batch_count
+        if exit_managed.order.side == Side.YES:
+            pnl_cents = (fill_price - entry_vwap) * batch_count
+        else:
+            pnl_cents = (entry_vwap - fill_price) * batch_count
         pnl_dollars = pnl_cents / 100.0
         self._daily_realized_pnl += pnl_dollars
+
+        revenue_dollars = (fill_price * batch_count) / 100.0
+        self.current_bankroll += revenue_dollars
 
         self.log.info(
             "Exit fill: {} x{} @{} (entry vwap={:.1f}) P&L=${:.2f} (daily=${:.2f})",

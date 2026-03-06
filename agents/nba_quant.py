@@ -170,27 +170,30 @@ class NBAQuantAgent(BaseAgent):
             if not proposals:
                 continue
 
-            # Rank by EV, best first
+            # Rank by EV, best first; execute first proposal that clears all hurdles
             proposals.sort(key=lambda s: s.ev_estimate, reverse=True)
-            best = proposals[0]
+            for proposal in proposals:
+                if await self._try_execute(proposal, game):
+                    break
 
-            await self._try_execute(best, game)
+    async def _try_execute(self, signal: Signal, game: GameState) -> bool:
+        """Context check, cooldown, capital check, and publish.
 
-    async def _try_execute(self, signal: Signal, game: GameState) -> None:
-        """Context check, cooldown, capital check, and publish."""
+        Returns True if a signal or reallocation was published.
+        """
         # --- Fail-close context check ---
         status, reason = await self.bus.get_context(game.game_id)
         if status != ContextStatus.SAFE:
             self.log.info(
                 "VETO for {} ({}): {}", game.game_id, signal.ticker, reason
             )
-            return
+            return False
 
         # --- Per-ticker cooldown ---
         now = datetime.utcnow()
         last = self._signal_cooldowns.get(signal.ticker)
         if last and (now - last).total_seconds() < 60:
-            return
+            return False
 
         entry_price_cents = signal.entry_price
 
@@ -202,11 +205,13 @@ class NBAQuantAgent(BaseAgent):
                 signal.source, signal.ticker, signal.ev_estimate,
                 signal.entry_price, signal.exit_price, signal.confidence,
             )
-        else:
-            await self._try_reallocate(
-                signal.ev_estimate, entry_price_cents,
-                signal.confidence, self._markets[signal.ticker], game,
-            )
+            return True
+
+        reallocated = await self._try_reallocate(
+            signal.ev_estimate, entry_price_cents,
+            signal.confidence, self._markets[signal.ticker], game,
+        )
+        return reallocated
 
     # ------------------------------------------------------------------
     # Capital awareness
@@ -234,11 +239,14 @@ class NBAQuantAgent(BaseAgent):
         model_prob: float,
         market: MarketState,
         game: GameState,
-    ) -> None:
+    ) -> bool:
         """Evaluate whether liquidating a resting exit frees enough capital
-        to fund a strictly better trade (unit-correct hurdle rate)."""
+        to fund a strictly better trade (unit-correct hurdle rate).
+
+        Returns True if a reallocation signal was published.
+        """
         if self._portfolio is None or not self._portfolio.positions:
-            return
+            return False
 
         for pos in self._portfolio.positions:
             ms = self._markets.get(pos.ticker)
@@ -302,7 +310,9 @@ class NBAQuantAgent(BaseAgent):
                 pos.ticker, pos.remaining_count, live_bid,
                 foregone_profit, expected_foregone, fees, total_new_ev_cents, market.ticker,
             )
-            return
+            return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Market mapping
