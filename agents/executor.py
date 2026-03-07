@@ -84,6 +84,9 @@ class OrderExecutor(BaseAgent):
         # Postgres pool for drawdown queries (lazily initialized)
         self._pg_pool: asyncpg.Pool | None = None
 
+        # OCO (one-cancels-other) pairs: spread-exit ↔ take-profit, bidirectional
+        self._oco_pairs: dict[str, str] = {}
+
     # ------------------------------------------------------------------
     # Startup reconciliation — crash-only architecture
     # ------------------------------------------------------------------
@@ -532,6 +535,11 @@ class OrderExecutor(BaseAgent):
             stop_task = self._hard_stop_tasks.pop(client_id, None)
             if stop_task and not stop_task.done():
                 stop_task.cancel()
+            # Cancel OCO paired leg (spread-exit ↔ take-profit)
+            paired_cid = self._oco_pairs.pop(client_id, None)
+            if paired_cid:
+                self._oco_pairs.pop(paired_cid, None)
+                await self._cancel_oco_pair(paired_cid)
             await self._trade_complete(managed, fill_count, fill_price)
         elif fill_count > 0:
             source = "flash_crash" if managed.order.client_order_id in self._flash_crash_entries else ""
@@ -631,6 +639,14 @@ class OrderExecutor(BaseAgent):
             task.add_done_callback(
                 lambda t: self._hard_stop_tasks.pop(exit_order.client_order_id, None)
             )
+        elif exit_managed.kalshi_order_id:
+            # 98c auto-cashout: for quant trades that filled below 95c, place a
+            # take-profit limit sell at 98c paired (OCO) with the spread exit.
+            actual_entry = entry.vwap_cents if entry.vwap_cents > 0 else (
+                entry.order.yes_price or entry.order.no_price or 0
+            )
+            if 0 < actual_entry < 95:
+                await self._place_take_profit(entry, batch_count, exit_order.client_order_id)
 
         await self._replay_deferred_fills()
 
@@ -801,6 +817,72 @@ class OrderExecutor(BaseAgent):
         except Exception:
             self.log.warning("Velocity check failed for {} — allowing trade", ticker)
             return True
+
+    # ------------------------------------------------------------------
+    # 98c take-profit + OCO management
+    # ------------------------------------------------------------------
+
+    async def _place_take_profit(
+        self, entry: ManagedOrder, batch_count: int, spread_exit_cid: str
+    ) -> None:
+        """Place a 98-cent take-profit limit sell paired OCO with the spread exit.
+
+        When either the spread exit or the TP fills, the other is immediately
+        canceled via ``_cancel_oco_pair``.  This locks in near-certain profits
+        before game resolution while keeping the lower-priced spread exit as
+        the primary fill path.
+        """
+        tp_order = Order(
+            ticker=entry.order.ticker,
+            action=Action.SELL,
+            side=entry.order.side,
+            count=batch_count,
+            yes_price=98 if entry.order.side == Side.YES else None,
+            no_price=98 if entry.order.side == Side.NO else None,
+        )
+        tp_managed = ManagedOrder(
+            order=tp_order,
+            state=OrderState.PLACED,
+            signal_id=entry.signal_id,
+            is_exit=True,
+            parent_entry_id=entry.order.client_order_id,
+        )
+        self._orders[tp_order.client_order_id] = tp_managed
+        entry.paired_exit_order_ids.append(tp_order.client_order_id)
+
+        # Register OCO pair before the API call so any fill event can resolve it
+        self._oco_pairs[spread_exit_cid] = tp_order.client_order_id
+        self._oco_pairs[tp_order.client_order_id] = spread_exit_cid
+
+        try:
+            resp = await self.client.place_order(tp_order)
+            kalshi_id = resp.get("order", {}).get("order_id", "")
+            tp_managed.kalshi_order_id = kalshi_id
+            self._kalshi_to_client[kalshi_id] = tp_order.client_order_id
+            self.log.info(
+                "TP order placed: {} SELL x{} @98c (kalshi_id={}) paired with spread exit {}",
+                tp_order.ticker, batch_count, kalshi_id, spread_exit_cid,
+            )
+        except Exception:
+            self.log.exception("Failed to place TP order for {} — removing OCO pair", entry.order.ticker)
+            self._oco_pairs.pop(spread_exit_cid, None)
+            self._oco_pairs.pop(tp_order.client_order_id, None)
+            self._orders.pop(tp_order.client_order_id, None)
+            entry.paired_exit_order_ids.remove(tp_order.client_order_id)
+
+    async def _cancel_oco_pair(self, client_order_id: str) -> None:
+        """Cancel and mark as CANCELED the order paired with the just-filled leg."""
+        paired = self._orders.get(client_order_id)
+        if paired is None or paired.state in (OrderState.FILLED, OrderState.CANCELED):
+            return
+        if paired.kalshi_order_id:
+            try:
+                await self.client.cancel_order(paired.kalshi_order_id)
+                self.log.info("OCO: canceled paired order {}", paired.kalshi_order_id)
+            except Exception:
+                self.log.warning("OCO: failed to cancel paired order {}", paired.kalshi_order_id)
+        paired.state = OrderState.CANCELED
+        paired.updated_at = datetime.utcnow()
 
     # ------------------------------------------------------------------
     # Hard stop timer (flash crash asymmetric stop-loss)

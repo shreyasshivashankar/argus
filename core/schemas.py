@@ -278,3 +278,6 @@ class AppSettings(BaseSettings):
 
     # Trade database (Postgres)
     DATABASE_URL: str = "postgresql://argus:argus@localhost:5432/argus"
+
+    # Per-game position cap (prevents ladder-stacking)
+    MAX_GAME_EXPOSURE: int = 2

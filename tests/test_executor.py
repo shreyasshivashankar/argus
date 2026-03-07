@@ -156,8 +156,10 @@ class TestFillLifecycle:
         assert managed.state == OrderState.FILLED
         assert managed.fill_count == 10
         assert managed.vwap_cents == 15.0
-        # Exit should have been placed
-        executor.client.place_order.assert_called_once()
+        # Spread exit + 98c TP (entry 15c < 95c) → 2 place_order calls
+        assert executor.client.place_order.call_count == 2
+        placed_prices = {c[0][0].yes_price for c in executor.client.place_order.call_args_list}
+        assert 98 in placed_prices
 
     @pytest.mark.asyncio
     async def test_two_partial_fills_vwap(self, executor):
@@ -175,8 +177,8 @@ class TestFillLifecycle:
         assert managed.state == OrderState.PARTIALLY_FILLED
         assert managed.fill_count == 40
         assert managed.vwap_cents == pytest.approx(18.0)
-        # Exit placed for batch of 40
-        assert executor.client.place_order.call_count == 1
+        # Spread exit + 98c TP for first batch → 2 calls
+        assert executor.client.place_order.call_count == 2
 
         # Second partial: 60 @ 22
         await executor.on_fill({
@@ -188,8 +190,8 @@ class TestFillLifecycle:
         assert managed.fill_count == 100
         expected_vwap = (18 * 40 + 22 * 60) / 100
         assert managed.vwap_cents == pytest.approx(expected_vwap)
-        # Second exit placed for batch of 60
-        assert executor.client.place_order.call_count == 2
+        # Spread exit + TP for second batch → 4 total calls
+        assert executor.client.place_order.call_count == 4
 
     @pytest.mark.asyncio
     async def test_deferred_fill_replayed(self, executor):

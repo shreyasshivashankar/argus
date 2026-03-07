@@ -96,12 +96,23 @@ class PlayerPropStrategy(BaseStrategy):
         if player.minutes < _MIN_PLAYER_MINUTES:
             return None
 
+        team_minutes = team_minutes_played(game)
+
+        # Late-Game Flyer Filter: ban cheap longshots in the first half (< 24 min elapsed).
+        # Prevents gambling on e.g. "Durant 35+ pts" at 10c with 24 minutes of variance left.
+        if team_minutes < 24.0 and market.yes_ask < 35:
+            return None
+
+        # Ban extremely cheap longshots at all times — Kelly sizing misbehaves below 15c.
+        if market.yes_ask < 15:
+            return None
+
         projected_pts = self._project_points(player, game)
         if projected_pts is None:
             return None
 
         is_over = self._is_over_ticker(market.ticker)
-        minutes_played = team_minutes_played(game)
+        minutes_played = team_minutes
         if is_over:
             model_prob = self._over_probability(projected_pts, line, minutes_played)
         else:

@@ -17,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from agents.strategies import FlashCrashStrategy, MoneylineStrategy, PlayerPropStrategy, TotalsStrategy
+from agents.strategies import FirstHalfStrategy, FlashCrashStrategy, MoneylineStrategy, PlayerPropStrategy, TotalsStrategy
 from agents.strategies.base import BaseStrategy
 from core.base_agent import BaseAgent
 from core.bus import SignalBus
@@ -82,6 +82,10 @@ class NBAQuantAgent(BaseAgent):
                 exit_spread=settings.FLASH_CRASH_EXIT_SPREAD,
                 min_price_cents=settings.FLASH_CRASH_MIN_PRICE,
                 score_delta_limit=settings.FLASH_CRASH_SCORE_DELTA_LIMIT,
+            ),
+            FirstHalfStrategy(
+                ev_threshold=ev_base,
+                target_exit_spread=settings.TARGET_EXIT_SPREAD,
             ),
         ]
 
@@ -216,6 +220,10 @@ class NBAQuantAgent(BaseAgent):
         if last and (now - last).total_seconds() < 60:
             return False
 
+        # --- Per-game exposure cap (98c cashouts free slots automatically) ---
+        if self._get_game_exposure(game.game_id) >= self.settings.MAX_GAME_EXPOSURE:
+            return False
+
         entry_price_cents = signal.entry_price
 
         if self._can_fund_trade(entry_price_cents):
@@ -341,6 +349,25 @@ class NBAQuantAgent(BaseAgent):
         return False
 
     # ------------------------------------------------------------------
+    # Per-game exposure tracking
+    # ------------------------------------------------------------------
+
+    def _get_game_exposure(self, game_id: str) -> int:
+        """Count open (not yet cashed-out) positions for this game.
+
+        Uses portfolio positions (resting exit orders) as the source of truth.
+        98c auto-cashout fills remove positions from the portfolio immediately,
+        so cashed-out slots are automatically available for reinvestment.
+        """
+        if not self._portfolio or not self._portfolio.positions:
+            return 0
+        valid_tickers = self._game_to_tickers.get(game_id, [])
+        return sum(
+            1 for pos in self._portfolio.positions
+            if pos.ticker in valid_tickers and pos.remaining_count > 0
+        )
+
+    # ------------------------------------------------------------------
     # Market mapping
     # ------------------------------------------------------------------
 
@@ -370,8 +397,12 @@ class NBAQuantAgent(BaseAgent):
                     and "GAME" not in ticker_upper
                     and "TOTAL" not in ticker_upper
                 )
+                is_first_half = "1H" in ticker_upper or "HALF" in ticker_upper
                 if is_prop:
                     if home in ticker_upper or away in ticker_upper:
+                        matched.append(ticker)
+                elif is_first_half:
+                    if home in ticker_upper and away in ticker_upper:
                         matched.append(ticker)
                 elif "GAME" in ticker_upper or "TOTAL" in ticker_upper:
                     if home in ticker_upper and away in ticker_upper:

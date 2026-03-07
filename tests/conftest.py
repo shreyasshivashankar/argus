@@ -59,6 +59,7 @@ def settings() -> AppSettings:
         VELOCITY_WINDOW_SECONDS=60,
         FLASH_CRASH_HARD_STOP_TIMEOUT=180,
         MAX_SESSION_DRAWDOWN_PCT=0.10,
+        MAX_GAME_EXPOSURE=2,
     )
 
 
