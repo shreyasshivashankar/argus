@@ -355,6 +355,93 @@ class TestCheckBailout:
         await agent._check_bailout(pos)
         mock_bus.publish.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_no_side_bailout_uses_no_bid(
+        self, settings, mock_bus, mock_client
+    ):
+        """For a Side.NO position, bailout must use no_bid and P(NO) = 1 - P(YES)."""
+        from core.schemas import MarketState
+        from datetime import datetime
+
+        agent = self._make_agent(settings, mock_bus, mock_client)
+
+        # DEN trails by 10 in Q4 → P(LAL wins YES) ≈ 88% → P(DEN wins NO) ≈ 12%
+        game = make_game_state(game_id="game-001", home_score=90, away_score=80, quarter=4)
+        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        agent._games["game-001"] = game
+
+        # Ticker is LAL game-winner; we hold NO (we bet LAL would lose)
+        agent._game_to_tickers["game-001"] = ["KXNBA-GAME-LAL-DEN-LAL"]
+
+        # no_bid=65c: market thinks P(LAL loses/NO) = 65%
+        # Our model: P(LAL YES) ≈ 88% → P(NO) ≈ 12%
+        # 12 <= 65 - 15 = 50 → bailout fires
+        market = MarketState(
+            ticker="KXNBA-GAME-LAL-DEN-LAL",
+            yes_bid=30,
+            yes_ask=32,
+            no_bid=65,
+            no_ask=67,
+            volume=100,
+            timestamp=datetime.utcnow(),
+        )
+        agent._markets["KXNBA-GAME-LAL-DEN-LAL"] = market
+
+        pos = make_portfolio_position(
+            ticker="KXNBA-GAME-LAL-DEN-LAL",
+            side=Side.NO,
+            remaining_count=10,
+            entry_vwap=50.0,
+            target_exit_price=75,
+        )
+
+        mock_bus.publish = AsyncMock()
+        await agent._check_bailout(pos)
+
+        mock_bus.publish.assert_called_once()
+        channel, signal = mock_bus.publish.call_args[0]
+        assert channel == "signal:bailout"
+        assert signal.side == Side.NO
+        assert signal.entry_price == 65  # no_bid, not yes_bid
+
+    @pytest.mark.asyncio
+    async def test_no_bailout_when_no_bid_is_zero(
+        self, settings, mock_bus, mock_client
+    ):
+        """If no_bid is 0 (market not quoting NO), don't fire a bailout for a NO position."""
+        from core.schemas import MarketState
+        from datetime import datetime
+
+        agent = self._make_agent(settings, mock_bus, mock_client)
+
+        game = make_game_state(game_id="game-001", home_score=90, away_score=80, quarter=4)
+        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        agent._games["game-001"] = game
+        agent._game_to_tickers["game-001"] = ["KXNBA-GAME-LAL-DEN-LAL"]
+
+        market = MarketState(
+            ticker="KXNBA-GAME-LAL-DEN-LAL",
+            yes_bid=80,
+            yes_ask=82,
+            no_bid=0,   # not quoting NO side
+            no_ask=0,
+            volume=100,
+            timestamp=datetime.utcnow(),
+        )
+        agent._markets["KXNBA-GAME-LAL-DEN-LAL"] = market
+
+        pos = make_portfolio_position(
+            ticker="KXNBA-GAME-LAL-DEN-LAL",
+            side=Side.NO,
+            remaining_count=10,
+            entry_vwap=20.0,
+            target_exit_price=30,
+        )
+
+        mock_bus.publish = AsyncMock()
+        await agent._check_bailout(pos)
+        mock_bus.publish.assert_not_called()
+
 
 # ===========================================================================
 # OrderExecutor._execute_bailout

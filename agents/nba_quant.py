@@ -455,7 +455,7 @@ class NBAQuantAgent(BaseAgent):
             return
 
         market = self._markets.get(pos.ticker)
-        if market is None or market.yes_bid <= 0:
+        if market is None:
             return
 
         game = self._find_game_for_ticker(pos.ticker)
@@ -463,6 +463,7 @@ class NBAQuantAgent(BaseAgent):
             return
 
         # Ask every strategy that can price this market for its raw model prob.
+        # model_prob is always P(YES wins) regardless of our held side.
         model_prob: float | None = None
         for strategy in self._strategies:
             if strategy.can_evaluate(market):
@@ -473,16 +474,28 @@ class NBAQuantAgent(BaseAgent):
         if model_prob is None:
             return
 
-        fair_value_cents = model_prob * 100.0
-        bailout_threshold = market.yes_bid - self.settings.BAILOUT_MARGIN_CENTS
+        # Side-aware fair value and current bid.
+        # If we hold YES: fair value = P(YES) cents, sell at yes_bid.
+        # If we hold NO:  fair value = P(NO) = (1 - P(YES)) cents, sell at no_bid.
+        if pos.side == Side.YES:
+            current_bid = market.yes_bid
+            fair_value_cents = model_prob * 100.0
+        else:
+            current_bid = market.no_bid
+            fair_value_cents = (1.0 - model_prob) * 100.0
+
+        if current_bid <= 0:
+            return
+
+        bailout_threshold = current_bid - self.settings.BAILOUT_MARGIN_CENTS
 
         if fair_value_cents > bailout_threshold:
             return
 
         self._bailout_cooldowns[pos.client_order_id] = now
         self.log.warning(
-            "BAILOUT triggered: {} fair={:.1f}c bid={}c threshold={}c — cutting loss",
-            pos.ticker, fair_value_cents, market.yes_bid, bailout_threshold,
+            "BAILOUT triggered: {} ({}) fair={:.1f}c bid={}c threshold={}c — cutting loss",
+            pos.ticker, pos.side, fair_value_cents, current_bid, bailout_threshold,
         )
 
         signal = Signal(
@@ -490,10 +503,10 @@ class NBAQuantAgent(BaseAgent):
             action=Action.SELL,
             side=pos.side,
             status=SignalStatus.BAILOUT,
-            confidence=model_prob,
+            confidence=fair_value_cents / 100.0,
             source=self.name,
-            ev_estimate=fair_value_cents / 100.0 - market.yes_bid / 100.0,
-            entry_price=market.yes_bid,
+            ev_estimate=fair_value_cents / 100.0 - current_bid / 100.0,
+            entry_price=current_bid,
             exit_price=pos.target_exit_price,
             game_id=game.game_id,
             target_order_id=pos.client_order_id,
