@@ -215,7 +215,7 @@ class OrderExecutor(BaseAgent):
             balance_task = asyncio.create_task(self._balance_poll_loop())
             signal_task = asyncio.create_task(
                 self.bus.subscribe(
-                    ["signal:validated", "signal:reallocate", "SYSTEM:HALT"],
+                    ["signal:validated", "signal:reallocate", "signal:bailout", "SYSTEM:HALT"],
                     self._on_signal,
                 )
             )
@@ -327,6 +327,11 @@ class OrderExecutor(BaseAgent):
             signal = Signal.model_validate(data)
         except Exception:
             self.log.warning("Bad signal payload: {}", data)
+            return
+
+        # BAILOUT bypasses the kill switch — loss-cutting must always proceed.
+        if signal.status == SignalStatus.BAILOUT:
+            await self._execute_bailout(signal)
             return
 
         if self._kill_switch_tripped:
@@ -443,6 +448,12 @@ class OrderExecutor(BaseAgent):
 
         managed.state = OrderState.CANCELED
 
+        # Clean up any OCO-paired TP that was resting alongside this exit.
+        paired_cid = self._oco_pairs.pop(target_id, None)
+        if paired_cid:
+            self._oco_pairs.pop(paired_cid, None)
+            await self._cancel_oco_pair(paired_cid)
+
         aggressive_price = signal.entry_price
         sell_order = Order(
             ticker=managed.order.ticker,
@@ -473,6 +484,91 @@ class OrderExecutor(BaseAgent):
             )
         except Exception:
             self.log.exception("REALLOCATE: failed to place aggressive sell")
+
+        await self._replay_deferred_fills()
+
+    # ------------------------------------------------------------------
+    # Bailout (EV-based loss-cut: sell at market bid)
+    # ------------------------------------------------------------------
+
+    async def _execute_bailout(self, signal: Signal) -> None:
+        """Aggressively sell a deteriorating position at the current bid.
+
+        signal.target_order_id identifies the resting exit order that wraps
+        our inventory.  We cancel it, cancel any OCO partner, then immediately
+        place a market-crossing limit sell at signal.entry_price (the bid).
+        """
+        target_id = signal.target_order_id
+        if not target_id or target_id not in self._orders:
+            self.log.warning("BAILOUT: unknown target_order_id {}", target_id)
+            return
+
+        managed = self._orders[target_id]
+        if not managed.is_exit or not managed.kalshi_order_id:
+            self.log.warning("BAILOUT: target {} is not a resting exit", target_id)
+            return
+
+        # Cancel the resting exit and its OCO partner.
+        cancel_event = asyncio.Event()
+        self._cancel_events[managed.kalshi_order_id] = cancel_event
+        try:
+            await self.client.cancel_order(managed.kalshi_order_id)
+        except Exception:
+            self._cancel_events.pop(managed.kalshi_order_id, None)
+            self.log.exception("BAILOUT: failed to cancel resting exit {}", managed.kalshi_order_id)
+            return
+
+        try:
+            await asyncio.wait_for(cancel_event.wait(), timeout=5.0)
+            await asyncio.sleep(0.2)
+        except asyncio.TimeoutError:
+            self.log.warning(
+                "BAILOUT: cancel confirm timed out for {} — proceeding anyway",
+                managed.kalshi_order_id,
+            )
+        finally:
+            self._cancel_events.pop(managed.kalshi_order_id, None)
+
+        managed.state = OrderState.CANCELED
+
+        # Clean up any OCO-paired TP order.
+        paired_cid = self._oco_pairs.pop(target_id, None)
+        if paired_cid:
+            self._oco_pairs.pop(paired_cid, None)
+            await self._cancel_oco_pair(paired_cid)
+
+        # Place aggressive sell at the current bid to exit the position.
+        bid_price = signal.entry_price
+        sell_order = Order(
+            ticker=managed.order.ticker,
+            action=Action.SELL,
+            side=managed.order.side,
+            count=managed.order.count,
+            yes_price=bid_price if managed.order.side == Side.YES else None,
+            no_price=bid_price if managed.order.side == Side.NO else None,
+        )
+        sell_managed = ManagedOrder(
+            order=sell_order,
+            state=OrderState.PLACED,
+            signal_id=managed.signal_id,
+            is_exit=True,
+            parent_entry_id=managed.parent_entry_id,
+        )
+        self._orders[sell_order.client_order_id] = sell_managed
+
+        try:
+            resp = await self.client.place_order(sell_order)
+            kalshi_id = resp.get("order", {}).get("order_id", "")
+            sell_managed.kalshi_order_id = kalshi_id
+            self._kalshi_to_client[kalshi_id] = sell_order.client_order_id
+            self.log.info(
+                "BAILOUT: sell placed {} x{} @{}c (kalshi={}, entry_vwap={}c)",
+                sell_order.ticker, sell_order.count, bid_price,
+                kalshi_id, managed.parent_entry_id and
+                (self._orders.get(managed.parent_entry_id) or managed).vwap_cents,
+            )
+        except Exception:
+            self.log.exception("BAILOUT: failed to place sell for {}", managed.order.ticker)
 
         await self._replay_deferred_fills()
 

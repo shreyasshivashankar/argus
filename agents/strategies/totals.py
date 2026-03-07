@@ -104,6 +104,28 @@ class TotalsStrategy(BaseStrategy):
         )
 
     # ------------------------------------------------------------------
+    # Bailout interface
+    # ------------------------------------------------------------------
+
+    def model_probability(self, game: GameState, market: MarketState) -> float | None:
+        """Raw over/under probability — no EV gate."""
+        if game.quarter > 4:
+            return None
+        line = self._extract_line(market.ticker)
+        if line is None:
+            return None
+        minutes_played = team_minutes_played(game)
+        if minutes_played < self._min_minutes:
+            return None
+        current_total = game.home_score + game.away_score
+        pace_per_minute = current_total / minutes_played
+        projected_final = pace_per_minute * MINUTES_PER_GAME
+        is_over = self._is_over_ticker(market.ticker)
+        if is_over:
+            return self._over_probability(projected_final, line, minutes_played)
+        return 1.0 - self._over_probability(projected_final, line, minutes_played)
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 

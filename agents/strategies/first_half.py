@@ -88,6 +88,17 @@ class FirstHalfStrategy(BaseStrategy):
         )
 
     # ------------------------------------------------------------------
+    # Bailout interface
+    # ------------------------------------------------------------------
+
+    def model_probability(self, game: GameState, market: MarketState) -> float | None:
+        """Raw first-half win probability — no EV gate."""
+        if game.quarter not in (1, 2):
+            return None
+        target_team = market.ticker.split("-")[-1]
+        return self._half_win_probability(game, target_team)
+
+    # ------------------------------------------------------------------
     # Probability model
     # ------------------------------------------------------------------
 

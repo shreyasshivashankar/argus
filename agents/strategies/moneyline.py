@@ -80,6 +80,17 @@ class MoneylineStrategy(BaseStrategy):
         )
 
     # ------------------------------------------------------------------
+    # Bailout interface
+    # ------------------------------------------------------------------
+
+    def model_probability(self, game: GameState, market: MarketState) -> float | None:
+        """Raw win probability for the YES side — no EV gate."""
+        if market.yes_ask <= 0:
+            return None
+        target_team = market.ticker.split("-")[-1]
+        return self._win_probability(game, target_team)
+
+    # ------------------------------------------------------------------
     # Probability model
     # ------------------------------------------------------------------
 

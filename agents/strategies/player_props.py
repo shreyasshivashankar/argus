@@ -143,6 +143,29 @@ class PlayerPropStrategy(BaseStrategy):
         )
 
     # ------------------------------------------------------------------
+    # Bailout interface
+    # ------------------------------------------------------------------
+
+    def model_probability(self, game: GameState, market: MarketState) -> float | None:
+        """Raw over/under probability for the player prop — no EV gate."""
+        if not game.player_stats:
+            return None
+        line = self._extract_line(market.ticker)
+        if line is None:
+            return None
+        player = self._match_player(market.ticker, game)
+        if player is None or player.minutes < _MIN_PLAYER_MINUTES:
+            return None
+        projected_pts = self._project_points(player, game)
+        if projected_pts is None:
+            return None
+        minutes_played = team_minutes_played(game)
+        is_over = self._is_over_ticker(market.ticker)
+        if is_over:
+            return self._over_probability(projected_pts, line, minutes_played)
+        return 1.0 - self._over_probability(projected_pts, line, minutes_played)
+
+    # ------------------------------------------------------------------
     # Player matching
     # ------------------------------------------------------------------
 

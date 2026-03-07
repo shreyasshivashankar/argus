@@ -19,6 +19,7 @@ class SignalStatus(StrEnum):
     VETOED = "VETOED"
     EXECUTED = "EXECUTED"
     REALLOCATE = "REALLOCATE"
+    BAILOUT = "BAILOUT"
 
 
 class ContextStatus(StrEnum):
@@ -281,3 +282,7 @@ class AppSettings(BaseSettings):
 
     # Per-game position cap (prevents ladder-stacking)
     MAX_GAME_EXPOSURE: int = 2
+
+    # EV-based bailout: cut losses when model fair value falls well below market bid
+    BAILOUT_MARGIN_CENTS: int = 15   # Fire bailout if fair_value <= yes_bid - margin
+    BAILOUT_POLL_INTERVAL: float = 10.0  # Seconds between portfolio re-evaluations

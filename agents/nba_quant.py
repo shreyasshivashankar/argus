@@ -28,6 +28,7 @@ from core.schemas import (
     ContextStatus,
     GameState,
     MarketState,
+    PortfolioPosition,
     PortfolioState,
     Side,
     Signal,
@@ -108,14 +109,19 @@ class NBAQuantAgent(BaseAgent):
         # Brief global pause after reallocation to let exchange cash settle
         self._global_realloc_lock: datetime | None = None
 
+        # Per-ticker bailout cooldown: prevent hammering the same position
+        self._bailout_cooldowns: dict[str, datetime] = {}
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
+        monitor_task = asyncio.create_task(self._manage_open_positions())
         await self.bus.subscribe(
             ["game:state", "market:state", "portfolio:state"], self._on_message
         )
+        monitor_task.cancel()
 
     async def _on_message(self, channel: str, data: dict[str, Any]) -> None:
         if channel == "game:state":
@@ -421,3 +427,82 @@ class NBAQuantAgent(BaseAgent):
             tickers.append(ticker)
         self._logged_unmapped.discard(game_id)
         self.log.info("Mapped game {} → ticker {}", game_id, ticker)
+
+    # ------------------------------------------------------------------
+    # EV-based bailout monitor
+    # ------------------------------------------------------------------
+
+    async def _manage_open_positions(self) -> None:
+        """Background loop: re-evaluate every open position every BAILOUT_POLL_INTERVAL.
+
+        If the model's fair value has fallen well below the current bid
+        (meaning the market now agrees we are losing), fire an aggressive
+        BAILOUT sell to cut losses before the position expires worthless.
+        """
+        while self._running:
+            await asyncio.sleep(self.settings.BAILOUT_POLL_INTERVAL)
+            if not self._portfolio or not self._portfolio.positions:
+                continue
+            for pos in list(self._portfolio.positions):
+                await self._check_bailout(pos)
+
+    async def _check_bailout(self, pos: PortfolioPosition) -> None:
+        """Re-evaluate a single position; fire BAILOUT signal if warranted."""
+        # Per-ticker bailout cooldown (60 s) to avoid signal storms.
+        now = datetime.utcnow()
+        last = self._bailout_cooldowns.get(pos.client_order_id)
+        if last and (now - last).total_seconds() < 60:
+            return
+
+        market = self._markets.get(pos.ticker)
+        if market is None or market.yes_bid <= 0:
+            return
+
+        game = self._find_game_for_ticker(pos.ticker)
+        if game is None:
+            return
+
+        # Ask every strategy that can price this market for its raw model prob.
+        model_prob: float | None = None
+        for strategy in self._strategies:
+            if strategy.can_evaluate(market):
+                model_prob = strategy.model_probability(game, market)
+                if model_prob is not None:
+                    break
+
+        if model_prob is None:
+            return
+
+        fair_value_cents = model_prob * 100.0
+        bailout_threshold = market.yes_bid - self.settings.BAILOUT_MARGIN_CENTS
+
+        if fair_value_cents > bailout_threshold:
+            return
+
+        self._bailout_cooldowns[pos.client_order_id] = now
+        self.log.warning(
+            "BAILOUT triggered: {} fair={:.1f}c bid={}c threshold={}c — cutting loss",
+            pos.ticker, fair_value_cents, market.yes_bid, bailout_threshold,
+        )
+
+        signal = Signal(
+            ticker=pos.ticker,
+            action=Action.SELL,
+            side=pos.side,
+            status=SignalStatus.BAILOUT,
+            confidence=model_prob,
+            source=self.name,
+            ev_estimate=fair_value_cents / 100.0 - market.yes_bid / 100.0,
+            entry_price=market.yes_bid,
+            exit_price=pos.target_exit_price,
+            game_id=game.game_id,
+            target_order_id=pos.client_order_id,
+        )
+        await self.bus.publish("signal:bailout", signal)
+
+    def _find_game_for_ticker(self, ticker: str) -> GameState | None:
+        """Return the GameState whose market mapping includes *ticker*."""
+        for game_id, tickers in self._game_to_tickers.items():
+            if ticker in tickers:
+                return self._games.get(game_id)
+        return None

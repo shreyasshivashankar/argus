@@ -60,6 +60,8 @@ def settings() -> AppSettings:
         FLASH_CRASH_HARD_STOP_TIMEOUT=180,
         MAX_SESSION_DRAWDOWN_PCT=0.10,
         MAX_GAME_EXPOSURE=2,
+        BAILOUT_MARGIN_CENTS=15,
+        BAILOUT_POLL_INTERVAL=10.0,
     )
 
 

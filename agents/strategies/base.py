@@ -24,6 +24,15 @@ class BaseStrategy(ABC):
     def evaluate(self, game: GameState, market: MarketState) -> Signal | None:
         """Return a Signal if a +EV edge is found, else None."""
 
+    def model_probability(self, game: GameState, market: MarketState) -> float | None:
+        """Return the strategy's raw model probability for the YES side, or None.
+
+        Used by the bailout monitor to re-evaluate open positions without the
+        EV threshold gate.  Strategies that can't price the market return None,
+        which suppresses bailout for that position (safe default: no action).
+        """
+        return None
+
     @staticmethod
     def time_adjusted_ev_threshold(
         base_threshold: float,

@@ -1,0 +1,546 @@
+"""Tests for the EV-based bailout system.
+
+Covers:
+  - model_probability() per strategy
+  - NBAQuantAgent._check_bailout() fire / no-fire logic
+  - NBAQuantAgent._find_game_for_ticker()
+  - OrderExecutor._execute_bailout() — cancel resting exit, OCO cleanup, place sell
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from agents.strategies.first_half import FirstHalfStrategy
+from agents.strategies.moneyline import MoneylineStrategy
+from agents.strategies.player_props import PlayerPropStrategy
+from agents.strategies.totals import TotalsStrategy
+from core.schemas import (
+    Action,
+    ManagedOrder,
+    Order,
+    OrderState,
+    Signal,
+    SignalStatus,
+    Side,
+)
+from tests.conftest import (
+    make_game_state,
+    make_managed_order,
+    make_market_state,
+    make_order,
+    make_player_box_score,
+    make_portfolio_position,
+    make_portfolio_state,
+)
+
+
+# ===========================================================================
+# model_probability — MoneylineStrategy
+# ===========================================================================
+
+class TestMoneylineModelProbability:
+    def _make_strategy(self):
+        return MoneylineStrategy(ev_threshold=0.03, target_exit_spread=7)
+
+    def test_returns_float_for_valid_game(self):
+        strat = self._make_strategy()
+        game = make_game_state(home_score=80, away_score=85, quarter=3)
+        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        market = make_market_state(ticker="KXNBA-GAME-LAL-DEN-LAL", yes_ask=40)
+        prob = strat.model_probability(game, market)
+        assert prob is not None
+        assert 0.0 < prob < 1.0
+
+    def test_returns_none_for_zero_ask(self):
+        strat = self._make_strategy()
+        game = make_game_state()
+        market = make_market_state(yes_ask=0)
+        assert strat.model_probability(game, market) is None
+
+    def test_home_team_high_prob_when_leading_late(self):
+        """LAL leading by 10 in Q4 → high P(LAL wins)."""
+        strat = self._make_strategy()
+        game = make_game_state(home_score=90, away_score=80, quarter=4)
+        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        market = make_market_state(ticker="KXNBA-GAME-LAL-DEN-LAL", yes_ask=85)
+        prob = strat.model_probability(game, market)
+        assert prob is not None
+        assert prob > 0.80
+
+
+# ===========================================================================
+# model_probability — TotalsStrategy
+# ===========================================================================
+
+class TestTotalsModelProbability:
+    def _make_strategy(self):
+        return TotalsStrategy(ev_threshold=0.03, target_exit_spread=7, min_minutes=6.0)
+
+    def test_returns_float_for_over_ticker(self):
+        strat = self._make_strategy()
+        # 6 minutes played, 20 pts scored → fast pace, likely to go over 225
+        game = make_game_state(home_score=12, away_score=8, quarter=1)
+        market = make_market_state(ticker="KXNBATOTAL-LAL-DEN-O200", yes_ask=55)
+        prob = strat.model_probability(game, market)
+        assert prob is not None
+        assert 0.0 <= prob <= 1.0
+
+    def test_returns_none_when_no_line(self):
+        strat = self._make_strategy()
+        game = make_game_state(home_score=40, away_score=35, quarter=2)
+        market = make_market_state(ticker="KXNBATOTAL-NOLINE", yes_ask=50)
+        assert strat.model_probability(game, market) is None
+
+    def test_returns_none_for_overtime(self):
+        strat = self._make_strategy()
+        game = make_game_state(quarter=5)
+        market = make_market_state(ticker="KXNBATOTAL-LAL-DEN-O225", yes_ask=50)
+        assert strat.model_probability(game, market) is None
+
+    def test_under_ticker_complement(self):
+        """Under probability should be 1 - over probability."""
+        strat = self._make_strategy()
+        game = make_game_state(home_score=40, away_score=35, quarter=2)
+        over_market = make_market_state(ticker="KXNBATOTAL-LAL-DEN-O200", yes_ask=55)
+        under_market = make_market_state(ticker="KXNBATOTAL-LAL-DEN-U200", yes_ask=45)
+        p_over = strat.model_probability(game, over_market)
+        p_under = strat.model_probability(game, under_market)
+        assert p_over is not None and p_under is not None
+        assert abs(p_over + p_under - 1.0) < 1e-9
+
+
+# ===========================================================================
+# model_probability — PlayerPropStrategy
+# ===========================================================================
+
+class TestPlayerPropModelProbability:
+    def _make_strategy(self):
+        return PlayerPropStrategy(ev_threshold=0.03, target_exit_spread=7)
+
+    def _make_lebron_game(self):
+        player = make_player_box_score(
+            first_name="LeBron", last_name="James",
+            team_abbr="LAL", minutes=28.0, pts=22, fgm=8, fga=16,
+        )
+        # Add teammates so team_fga >= 10
+        teammate = make_player_box_score(
+            player_id="99999", first_name="A", last_name="Davis",
+            team_abbr="LAL", minutes=28.0, pts=18, fgm=7, fga=14,
+        )
+        return make_game_state(quarter=3, player_stats=[player, teammate])
+
+    def test_returns_float_for_matched_player(self):
+        strat = self._make_strategy()
+        game = self._make_lebron_game()
+        market = make_market_state(ticker="KXNBA-PLAYERPTS-LJAMES-O28", yes_ask=45)
+        prob = strat.model_probability(game, market)
+        assert prob is not None
+        assert 0.0 <= prob <= 1.0
+
+    def test_returns_none_when_no_player_stats(self):
+        strat = self._make_strategy()
+        game = make_game_state(player_stats=[])
+        market = make_market_state(ticker="KXNBA-PLAYERPTS-LJAMES-O28", yes_ask=45)
+        assert strat.model_probability(game, market) is None
+
+    def test_returns_none_when_player_not_found(self):
+        strat = self._make_strategy()
+        player = make_player_box_score(first_name="Stephen", last_name="Curry")
+        game = make_game_state(player_stats=[player])
+        market = make_market_state(ticker="KXNBA-PLAYERPTS-LJAMES-O28", yes_ask=45)
+        assert strat.model_probability(game, market) is None
+
+
+# ===========================================================================
+# model_probability — FirstHalfStrategy
+# ===========================================================================
+
+class TestFirstHalfModelProbability:
+    def _make_strategy(self):
+        return FirstHalfStrategy(ev_threshold=0.03, target_exit_spread=7)
+
+    def test_returns_float_in_q1(self):
+        strat = self._make_strategy()
+        game = make_game_state(home_score=20, away_score=15, quarter=1)
+        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        market = make_market_state(ticker="KXNBA-1H-LAL-DEN-LAL", yes_ask=55)
+        prob = strat.model_probability(game, market)
+        assert prob is not None
+        assert 0.0 < prob < 1.0
+
+    def test_returns_float_in_q2(self):
+        strat = self._make_strategy()
+        game = make_game_state(home_score=35, away_score=28, quarter=2)
+        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        market = make_market_state(ticker="KXNBA-1H-LAL-DEN-LAL", yes_ask=65)
+        prob = strat.model_probability(game, market)
+        assert prob is not None
+        assert prob > 0.5
+
+    def test_returns_none_in_q3(self):
+        """First half is over — strategy should return None."""
+        strat = self._make_strategy()
+        game = make_game_state(quarter=3)
+        market = make_market_state(ticker="KXNBA-1H-LAL-DEN-LAL", yes_ask=60)
+        assert strat.model_probability(game, market) is None
+
+    def test_returns_none_in_q4(self):
+        strat = self._make_strategy()
+        game = make_game_state(quarter=4)
+        market = make_market_state(ticker="KXNBA-1H-LAL-DEN-LAL", yes_ask=60)
+        assert strat.model_probability(game, market) is None
+
+
+# ===========================================================================
+# NBAQuantAgent._find_game_for_ticker
+# ===========================================================================
+
+class TestFindGameForTicker:
+    def _make_agent(self, settings, mock_bus, mock_client):
+        from agents.nba_quant import NBAQuantAgent
+        return NBAQuantAgent(settings, mock_bus, mock_client)
+
+    def test_returns_game_when_ticker_mapped(self, settings, mock_bus, mock_client):
+        agent = self._make_agent(settings, mock_bus, mock_client)
+        game = make_game_state(game_id="game-001")
+        agent._games["game-001"] = game
+        agent._game_to_tickers["game-001"] = ["KXNBA-GAME-LAL"]
+        result = agent._find_game_for_ticker("KXNBA-GAME-LAL")
+        assert result is game
+
+    def test_returns_none_when_not_mapped(self, settings, mock_bus, mock_client):
+        agent = self._make_agent(settings, mock_bus, mock_client)
+        result = agent._find_game_for_ticker("KXNBA-GAME-BOS")
+        assert result is None
+
+    def test_returns_none_when_game_missing(self, settings, mock_bus, mock_client):
+        agent = self._make_agent(settings, mock_bus, mock_client)
+        agent._game_to_tickers["game-001"] = ["KXNBA-GAME-LAL"]
+        # game not in _games
+        result = agent._find_game_for_ticker("KXNBA-GAME-LAL")
+        assert result is None
+
+
+# ===========================================================================
+# NBAQuantAgent._check_bailout
+# ===========================================================================
+
+class TestCheckBailout:
+    def _make_agent(self, settings, mock_bus, mock_client):
+        from agents.nba_quant import NBAQuantAgent
+        return NBAQuantAgent(settings, mock_bus, mock_client)
+
+    @pytest.mark.asyncio
+    async def test_fires_bailout_when_fair_value_below_threshold(
+        self, settings, mock_bus, mock_client
+    ):
+        agent = self._make_agent(settings, mock_bus, mock_client)
+
+        game = make_game_state(game_id="game-001", home_score=90, away_score=80, quarter=4)
+        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        agent._games["game-001"] = game
+        agent._game_to_tickers["game-001"] = ["KXNBA-GAME-LAL-DEN-DEN"]
+
+        # Market has moved: yes_bid=70c (market thinks DEN has 70% chance)
+        # But model (LAL leads by 10 in Q4) thinks DEN only has ~15% → fair=15c
+        # 15 <= 70 - 15 = 55 → bailout fires
+        market = make_market_state(
+            ticker="KXNBA-GAME-LAL-DEN-DEN", yes_bid=70, yes_ask=72
+        )
+        agent._markets["KXNBA-GAME-LAL-DEN-DEN"] = market
+
+        pos = make_portfolio_position(
+            ticker="KXNBA-GAME-LAL-DEN-DEN",
+            side=Side.YES,
+            remaining_count=10,
+            entry_vwap=30.0,
+            target_exit_price=40,
+        )
+
+        mock_bus.publish = AsyncMock()
+        await agent._check_bailout(pos)
+
+        mock_bus.publish.assert_called_once()
+        channel, signal = mock_bus.publish.call_args[0]
+        assert channel == "signal:bailout"
+        assert signal.status == SignalStatus.BAILOUT
+        assert signal.ticker == "KXNBA-GAME-LAL-DEN-DEN"
+        assert signal.entry_price == 70  # current bid
+
+    @pytest.mark.asyncio
+    async def test_no_bailout_when_fair_value_above_threshold(
+        self, settings, mock_bus, mock_client
+    ):
+        agent = self._make_agent(settings, mock_bus, mock_client)
+
+        game = make_game_state(game_id="game-001", home_score=90, away_score=80, quarter=4)
+        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        agent._games["game-001"] = game
+        agent._game_to_tickers["game-001"] = ["KXNBA-GAME-LAL-DEN-LAL"]
+
+        # LAL leads 90-80 in Q4 → P(LAL) ~88%
+        # yes_bid=70c → threshold = 70 - 15 = 55 → 88 > 55 → no bailout
+        market = make_market_state(
+            ticker="KXNBA-GAME-LAL-DEN-LAL", yes_bid=70, yes_ask=72
+        )
+        agent._markets["KXNBA-GAME-LAL-DEN-LAL"] = market
+
+        pos = make_portfolio_position(
+            ticker="KXNBA-GAME-LAL-DEN-LAL",
+            side=Side.YES,
+            remaining_count=10,
+            entry_vwap=60.0,
+            target_exit_price=75,
+        )
+
+        mock_bus.publish = AsyncMock()
+        await agent._check_bailout(pos)
+        mock_bus.publish.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cooldown_suppresses_second_check(
+        self, settings, mock_bus, mock_client
+    ):
+        agent = self._make_agent(settings, mock_bus, mock_client)
+
+        game = make_game_state(game_id="game-001", home_score=90, away_score=80, quarter=4)
+        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        agent._games["game-001"] = game
+        agent._game_to_tickers["game-001"] = ["KXNBA-GAME-LAL-DEN-DEN"]
+
+        market = make_market_state(
+            ticker="KXNBA-GAME-LAL-DEN-DEN", yes_bid=70, yes_ask=72
+        )
+        agent._markets["KXNBA-GAME-LAL-DEN-DEN"] = market
+
+        pos = make_portfolio_position(
+            ticker="KXNBA-GAME-LAL-DEN-DEN",
+            client_order_id="exit-cool-001",
+            side=Side.YES,
+            remaining_count=10,
+            entry_vwap=30.0,
+            target_exit_price=40,
+        )
+
+        mock_bus.publish = AsyncMock()
+        await agent._check_bailout(pos)  # fires
+        mock_bus.publish.reset_mock()
+        await agent._check_bailout(pos)  # should be suppressed by cooldown
+        mock_bus.publish.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_bailout_when_market_missing(
+        self, settings, mock_bus, mock_client
+    ):
+        agent = self._make_agent(settings, mock_bus, mock_client)
+        pos = make_portfolio_position(ticker="KXNBA-GAME-UNKNOWN")
+        mock_bus.publish = AsyncMock()
+        await agent._check_bailout(pos)
+        mock_bus.publish.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_bailout_when_game_missing(
+        self, settings, mock_bus, mock_client
+    ):
+        agent = self._make_agent(settings, mock_bus, mock_client)
+        market = make_market_state(ticker="KXNBA-GAME-LAL", yes_bid=50, yes_ask=52)
+        agent._markets["KXNBA-GAME-LAL"] = market
+        pos = make_portfolio_position(ticker="KXNBA-GAME-LAL")
+        # No game mapped
+        mock_bus.publish = AsyncMock()
+        await agent._check_bailout(pos)
+        mock_bus.publish.assert_not_called()
+
+
+# ===========================================================================
+# OrderExecutor._execute_bailout
+# ===========================================================================
+
+class TestExecuteBailout:
+    @pytest.mark.asyncio
+    async def test_cancels_resting_exit_and_places_sell(self, executor, mock_client):
+        # Set up entry
+        entry_order = make_order(yes_price=30)
+        entry_managed = make_managed_order(order=entry_order, is_exit=False)
+        entry_managed.fill_count = 10
+        entry_managed.vwap_cents = 30.0
+        executor._orders[entry_order.client_order_id] = entry_managed
+
+        # Set up resting exit
+        exit_order = make_order(action=Action.SELL, yes_price=40)
+        exit_managed = make_managed_order(
+            order=exit_order, is_exit=True,
+            parent_entry_id=entry_order.client_order_id,
+        )
+        exit_managed.state = OrderState.RESTING
+        exit_managed.kalshi_order_id = "kalshi-exit-001"
+        executor._orders[exit_order.client_order_id] = exit_managed
+        executor._kalshi_to_client["kalshi-exit-001"] = exit_order.client_order_id
+
+        mock_client.cancel_order = AsyncMock(return_value={})
+        mock_client.place_order = AsyncMock(
+            return_value={"order": {"order_id": "kalshi-bailout-001"}}
+        )
+
+        signal = Signal(
+            ticker=exit_order.ticker,
+            action=Action.SELL,
+            side=Side.YES,
+            status=SignalStatus.BAILOUT,
+            confidence=0.15,
+            source="nba_quant",
+            ev_estimate=-0.45,
+            entry_price=20,  # current bid
+            exit_price=40,
+            game_id="game-001",
+            target_order_id=exit_order.client_order_id,
+        )
+
+        # Simulate cancel event fire (WS confirm)
+        import asyncio
+        async def fake_cancel(kalshi_id):
+            event = executor._cancel_events.get(kalshi_id)
+            if event:
+                event.set()
+        mock_client.cancel_order = AsyncMock(side_effect=fake_cancel)
+
+        await executor._execute_bailout(signal)
+
+        # Exit should be CANCELED
+        assert exit_managed.state == OrderState.CANCELED
+        # New sell placed at bid price (20c)
+        mock_client.place_order.assert_called_once()
+        placed = mock_client.place_order.call_args[0][0]
+        assert placed.action == Action.SELL
+        assert placed.yes_price == 20
+
+    @pytest.mark.asyncio
+    async def test_cancels_oco_paired_tp(self, executor, mock_client):
+        """When bailout fires, the paired TP must be canceled too."""
+        entry_order = make_order(yes_price=30)
+        entry_managed = make_managed_order(order=entry_order, is_exit=False)
+        executor._orders[entry_order.client_order_id] = entry_managed
+
+        # Resting spread exit
+        exit_order = make_order(action=Action.SELL, yes_price=40)
+        exit_managed = make_managed_order(order=exit_order, is_exit=True)
+        exit_managed.state = OrderState.RESTING
+        exit_managed.kalshi_order_id = "kalshi-exit-001"
+        executor._orders[exit_order.client_order_id] = exit_managed
+        executor._kalshi_to_client["kalshi-exit-001"] = exit_order.client_order_id
+
+        # Paired TP order
+        tp_order = make_order(action=Action.SELL, yes_price=98)
+        tp_managed = make_managed_order(order=tp_order, is_exit=True)
+        tp_managed.state = OrderState.RESTING
+        tp_managed.kalshi_order_id = "kalshi-tp-001"
+        executor._orders[tp_order.client_order_id] = tp_managed
+        executor._kalshi_to_client["kalshi-tp-001"] = tp_order.client_order_id
+
+        # Register OCO pair
+        executor._oco_pairs[exit_order.client_order_id] = tp_order.client_order_id
+        executor._oco_pairs[tp_order.client_order_id] = exit_order.client_order_id
+
+        import asyncio
+        canceled = []
+        async def fake_cancel(kalshi_id):
+            canceled.append(kalshi_id)
+            event = executor._cancel_events.get(kalshi_id)
+            if event:
+                event.set()
+
+        mock_client.cancel_order = AsyncMock(side_effect=fake_cancel)
+        mock_client.place_order = AsyncMock(
+            return_value={"order": {"order_id": "kalshi-bailout-001"}}
+        )
+
+        signal = Signal(
+            ticker=exit_order.ticker,
+            action=Action.SELL,
+            side=Side.YES,
+            status=SignalStatus.BAILOUT,
+            confidence=0.15,
+            source="nba_quant",
+            ev_estimate=-0.45,
+            entry_price=20,
+            exit_price=40,
+            game_id="game-001",
+            target_order_id=exit_order.client_order_id,
+        )
+
+        await executor._execute_bailout(signal)
+
+        # Both exit and TP should have been canceled
+        assert "kalshi-exit-001" in canceled
+        assert "kalshi-tp-001" in canceled
+        assert tp_managed.state == OrderState.CANCELED
+        # OCO map fully cleaned up
+        assert exit_order.client_order_id not in executor._oco_pairs
+        assert tp_order.client_order_id not in executor._oco_pairs
+
+    @pytest.mark.asyncio
+    async def test_skips_unknown_target(self, executor, mock_client):
+        signal = Signal(
+            ticker="NBA-YES-LAL",
+            action=Action.SELL,
+            side=Side.YES,
+            status=SignalStatus.BAILOUT,
+            confidence=0.15,
+            source="nba_quant",
+            ev_estimate=-0.45,
+            entry_price=20,
+            exit_price=40,
+            game_id="game-001",
+            target_order_id="does-not-exist",
+        )
+        mock_client.cancel_order = AsyncMock()
+        await executor._execute_bailout(signal)
+        mock_client.cancel_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bailout_bypasses_kill_switch(self, executor, mock_bus, mock_client):
+        """BAILOUT signals must be processed even when the kill switch is active."""
+        executor._kill_switch_tripped = True
+
+        entry_order = make_order(yes_price=30)
+        entry_managed = make_managed_order(order=entry_order, is_exit=False)
+        executor._orders[entry_order.client_order_id] = entry_managed
+
+        exit_order = make_order(action=Action.SELL, yes_price=40)
+        exit_managed = make_managed_order(order=exit_order, is_exit=True)
+        exit_managed.state = OrderState.RESTING
+        exit_managed.kalshi_order_id = "kalshi-exit-ks-001"
+        executor._orders[exit_order.client_order_id] = exit_managed
+        executor._kalshi_to_client["kalshi-exit-ks-001"] = exit_order.client_order_id
+
+        import asyncio
+        async def fake_cancel(kalshi_id):
+            event = executor._cancel_events.get(kalshi_id)
+            if event:
+                event.set()
+        mock_client.cancel_order = AsyncMock(side_effect=fake_cancel)
+        mock_client.place_order = AsyncMock(
+            return_value={"order": {"order_id": "kalshi-bailout-ks-001"}}
+        )
+
+        signal = Signal(
+            ticker=exit_order.ticker,
+            action=Action.SELL,
+            side=Side.YES,
+            status=SignalStatus.BAILOUT,
+            confidence=0.15,
+            source="nba_quant",
+            ev_estimate=-0.45,
+            entry_price=20,
+            exit_price=40,
+            game_id="game-001",
+            target_order_id=exit_order.client_order_id,
+        )
+
+        await executor._on_signal("signal:bailout", signal.model_dump())
+        # Kill switch is ON but bailout sell must still be placed
+        mock_client.place_order.assert_called_once()
