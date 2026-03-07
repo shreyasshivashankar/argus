@@ -269,3 +269,63 @@ class TestGetGameExposure:
 
         assert agent._get_game_exposure("game-001") == 0
         assert agent._get_game_exposure("game-002") == 1
+
+
+# ===========================================================================
+# TP orders excluded from portfolio publication
+# ===========================================================================
+
+class TestPublishPortfolioExcludesTP:
+    """98c TP orders must not appear in portfolio:state, otherwise a single
+    real entry would create 2 portfolio positions and hit the exposure cap of 2."""
+
+    @pytest.mark.asyncio
+    async def test_tp_orders_filtered_from_portfolio(self, settings, mock_bus, mock_client):
+        from agents.executor import OrderExecutor
+
+        executor = OrderExecutor(settings, mock_bus, mock_client)
+        executor.current_bankroll = 500.0
+
+        entry_cid = str(uuid.uuid4())
+        spread_exit_cid = str(uuid.uuid4())
+        tp_exit_cid = str(uuid.uuid4())
+
+        entry_order = make_order(
+            ticker="KXNBA-GAME-LAL", action=Action.BUY, side=Side.YES,
+            count=10, yes_price=45, client_order_id=entry_cid,
+        )
+        entry = make_managed_order(order=entry_order, is_exit=False)
+        entry.state = OrderState.FILLED
+        entry.vwap_cents = 45.0
+
+        spread_order = make_order(
+            ticker="KXNBA-GAME-LAL", action=Action.SELL, side=Side.YES,
+            count=10, yes_price=52, client_order_id=spread_exit_cid,
+        )
+        spread_exit = make_managed_order(
+            order=spread_order, is_exit=True, parent_entry_id=entry_cid,
+        )
+        spread_exit.state = OrderState.RESTING
+        spread_exit.kalshi_order_id = "kalshi-spread"
+
+        tp_order = make_order(
+            ticker="KXNBA-GAME-LAL", action=Action.SELL, side=Side.YES,
+            count=10, yes_price=98, client_order_id=tp_exit_cid,
+        )
+        tp_exit = make_managed_order(
+            order=tp_order, is_exit=True, parent_entry_id=entry_cid,
+        )
+        tp_exit.state = OrderState.RESTING
+        tp_exit.kalshi_order_id = "kalshi-tp"
+
+        executor._orders[entry_cid] = entry
+        executor._orders[spread_exit_cid] = spread_exit
+        executor._orders[tp_exit_cid] = tp_exit
+
+        await executor._publish_portfolio()
+
+        published = mock_bus.publish.call_args[0][1]
+        assert len(published.positions) == 1
+        pos = published.positions[0]
+        assert pos.client_order_id == spread_exit_cid
+        assert pos.target_exit_price == 52

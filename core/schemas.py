@@ -167,7 +167,7 @@ class ManagedOrder(BaseModel):
 class PortfolioPosition(BaseModel):
     """A resting exit order visible to the reallocation engine."""
 
-    model_config = ConfigDict(strict=True, frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     client_order_id: str
     ticker: str
@@ -181,8 +181,6 @@ class PortfolioPosition(BaseModel):
 
 class PortfolioState(BaseModel):
     """Snapshot of the executor's active portfolio, published to Redis."""
-
-    model_config = ConfigDict(strict=True)
 
     bankroll: float
     positions: list[PortfolioPosition] = Field(default_factory=list)

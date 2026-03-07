@@ -14,9 +14,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -26,12 +28,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
 
   argus:
     build:
       context: .
       target: production
-    command: ["--track"]
+    command: ["--env", "prod", "--track"]
     depends_on:
       redis:
         condition: service_healthy

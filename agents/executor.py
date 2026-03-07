@@ -243,15 +243,21 @@ class OrderExecutor(BaseAgent):
             await asyncio.sleep(self.settings.BALANCE_POLL_INTERVAL)
 
     async def _publish_portfolio(self) -> None:
-        """Build a PortfolioState snapshot and publish to portfolio:state."""
+        """Build a PortfolioState snapshot and publish to portfolio:state.
+
+        TP orders (98c OCO legs) are excluded — they are paired with the
+        spread exit and should not count as separate game exposure.
+        """
         resting_states = {OrderState.PLACED, OrderState.RESTING}
         positions: list[PortfolioPosition] = []
         for cid, managed in self._orders.items():
             if not managed.is_exit or managed.state not in resting_states:
                 continue
+            exit_price = managed.order.yes_price or managed.order.no_price or 0
+            if exit_price >= 98:
+                continue
             entry = self._orders.get(managed.parent_entry_id or "")
             entry_vwap = entry.vwap_cents if entry else 0.0
-            exit_price = managed.order.yes_price or managed.order.no_price or 0
             positions.append(PortfolioPosition(
                 client_order_id=cid,
                 ticker=managed.order.ticker,
