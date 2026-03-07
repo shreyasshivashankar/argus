@@ -62,6 +62,7 @@ def settings() -> AppSettings:
         MAX_GAME_EXPOSURE=2,
         BAILOUT_MARGIN_CENTS=15,
         BAILOUT_POLL_INTERVAL=10.0,
+        MAX_POSITION_PCT_BANKROLL=0.10,
     )
 
 

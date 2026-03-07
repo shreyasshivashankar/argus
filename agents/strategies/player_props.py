@@ -103,9 +103,7 @@ class PlayerPropStrategy(BaseStrategy):
         if team_minutes < 24.0 and market.yes_ask < 35:
             return None
 
-        # Ban extremely cheap longshots at all times — Kelly sizing misbehaves below 15c.
-        if market.yes_ask < 15:
-            return None
+        # Note: the < 15c absolute floor is now enforced globally in executor._kelly_size().
 
         projected_pts = self._project_points(player, game)
         if projected_pts is None:

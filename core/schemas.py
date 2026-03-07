@@ -286,3 +286,6 @@ class AppSettings(BaseSettings):
     # EV-based bailout: cut losses when model fair value falls well below market bid
     BAILOUT_MARGIN_CENTS: int = 15   # Fire bailout if fair_value <= yes_bid - margin
     BAILOUT_POLL_INTERVAL: float = 10.0  # Seconds between portfolio re-evaluations
+
+    # Kelly hard cap: max fraction of bankroll in any single position
+    MAX_POSITION_PCT_BANKROLL: float = 0.10  # 10% of bankroll ceiling

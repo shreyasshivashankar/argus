@@ -877,7 +877,10 @@ class OrderExecutor(BaseAgent):
             return 0
 
         entry_cents = signal.entry_price
-        if entry_cents <= 0 or entry_cents >= 100:
+
+        # Global firewall: deep longshots cause Kelly to explode and are
+        # operationally illiquid. Reject below 15c unconditionally.
+        if entry_cents < 15 or entry_cents >= 100:
             return 0
 
         p = signal.confidence
@@ -891,6 +894,9 @@ class OrderExecutor(BaseAgent):
         else:
             fraction = self.settings.QUANT_KELLY_FRACTION
         kelly_fraction = max(kelly_full * fraction, 0)
+
+        # Hard cap: never risk more than MAX_POSITION_PCT_BANKROLL of bankroll
+        kelly_fraction = min(kelly_fraction, self.settings.MAX_POSITION_PCT_BANKROLL)
 
         bankroll_cents = self.current_bankroll * 100
         bet_cents = kelly_fraction * bankroll_cents

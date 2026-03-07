@@ -44,24 +44,43 @@ class TestKellySize:
                 assert executor._kelly_size(sig) >= 0
 
     def test_known_calculation(self, executor):
-        """Verify the math for a specific case.
+        """Verify the math for a specific case — capped by MAX_POSITION_PCT_BANKROLL.
 
         confidence=0.7, entry_price=20, bankroll=$1000, QUANT_KELLY_FRACTION=0.5
         b = (100-20)/20 = 4.0
         kelly_full = (0.7*4 - 0.3)/4 = (2.8-0.3)/4 = 0.625
-        kelly_fraction = 0.625 * 0.5 = 0.3125
+        kelly_fraction_raw = 0.625 * 0.5 = 0.3125
+        kelly_fraction_capped = min(0.3125, 0.10) = 0.10  ← MAX_POSITION_PCT_BANKROLL
         bankroll_cents = 100000
-        bet_cents = 0.3125 * 100000 = 31250
-        count = floor(31250/20) = 1562
+        bet_cents = 0.10 * 100000 = 10000
+        count = floor(10000/20) = 500
         """
         executor.current_bankroll = 1000.0
         executor.settings.QUANT_KELLY_FRACTION = 0.5
+        executor.settings.MAX_POSITION_PCT_BANKROLL = 0.10
+        sig = make_signal(confidence=0.7, entry_price=20)
+        result = executor._kelly_size(sig)
+        assert result == 500
+
+    def test_known_calculation_uncapped(self, executor):
+        """When the bankroll cap is set high, raw Kelly fraction applies.
+
+        kelly_fraction_raw = 0.3125 < 1.0 cap → not capped
+        count = floor(0.3125 * 100000 / 20) = 1562
+        """
+        executor.current_bankroll = 1000.0
+        executor.settings.QUANT_KELLY_FRACTION = 0.5
+        executor.settings.MAX_POSITION_PCT_BANKROLL = 1.0
         sig = make_signal(confidence=0.7, entry_price=20)
         result = executor._kelly_size(sig)
         assert result == 1562
 
     def test_fraction_scaling(self, executor):
-        """Halving QUANT_KELLY_FRACTION should halve the position size."""
+        """Halving QUANT_KELLY_FRACTION should halve the position size.
+
+        Bankroll cap is raised to 1.0 so it doesn't interfere with this check.
+        """
+        executor.settings.MAX_POSITION_PCT_BANKROLL = 1.0
         sig = make_signal(confidence=0.7, entry_price=20)
         executor.settings.QUANT_KELLY_FRACTION = 1.0
         size_full = executor._kelly_size(sig)
@@ -444,6 +463,8 @@ class TestReallocate:
 class TestDynamicKelly:
 
     def test_quant_signal_uses_quant_fraction(self, executor):
+        # Disable the bankroll cap so this test measures fraction ratios cleanly.
+        executor.settings.MAX_POSITION_PCT_BANKROLL = 1.0
         executor.current_bankroll = 1000.0
         executor.settings.QUANT_KELLY_FRACTION = 0.5
         executor.settings.CRASH_KELLY_FRACTION = 0.1
@@ -460,6 +481,8 @@ class TestDynamicKelly:
 
     def test_crash_kelly_tenth_of_full(self, executor):
         """CRASH_KELLY=0.1 should be ~1/5 of QUANT_KELLY=0.5."""
+        # Disable the bankroll cap so this test measures fraction ratios cleanly.
+        executor.settings.MAX_POSITION_PCT_BANKROLL = 1.0
         executor.current_bankroll = 1000.0
         executor.settings.QUANT_KELLY_FRACTION = 0.5
         executor.settings.CRASH_KELLY_FRACTION = 0.1
