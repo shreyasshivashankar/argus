@@ -58,7 +58,8 @@ class TotalsStrategy(BaseStrategy):
         if market.yes_ask <= 0:
             return None
 
-        if game.quarter > 4:
+        # Skip Q1 — too little data for reliable pace projection
+        if game.quarter < 2 or game.quarter > 4:
             return None
 
         line = self._extract_line(market.ticker)

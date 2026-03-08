@@ -126,6 +126,7 @@ class Signal(BaseModel):
     game_id: str
     veto_reason: Optional[str] = None
     target_order_id: Optional[str] = None
+    no_entry_price: Optional[int] = None  # Arbitrage only: companion NO-side ask price
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     signal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
@@ -287,3 +288,12 @@ class AppSettings(BaseSettings):
 
     # Kelly hard cap: max fraction of bankroll in any single position
     MAX_POSITION_PCT_BANKROLL: float = 0.10  # 10% of bankroll ceiling
+
+    # Minimum entry price (cents) — rejects deep underdogs and illiquid contracts
+    MIN_ENTRY_PRICE_CENTS: int = 25
+
+    # Arbitrage: max combined YES_ask + NO_ask to fire (must clear fees ~4c)
+    ARB_MAX_COMBINED_CENTS: int = 95
+
+    # Totals: minimum team-minutes played before firing (ensures stable pace data)
+    TOTALS_MIN_MINUTES: float = 12.0

@@ -1,4 +1,4 @@
-"""Tests for strategy-level features: dynamic EV threshold and flash crash."""
+"""Tests for strategy-level features: dynamic EV threshold, flash crash, arbitrage."""
 from __future__ import annotations
 
 import time
@@ -6,10 +6,9 @@ from unittest.mock import patch
 
 import pytest
 
+from agents.strategies.arbitrage import ArbitrageStrategy
 from agents.strategies.base import BaseStrategy
-from agents.strategies.first_half import FirstHalfStrategy
 from agents.strategies.flash_crash import FlashCrashStrategy
-from agents.strategies.moneyline import MoneylineStrategy
 from agents.strategies.player_props import PlayerPropStrategy
 from agents.strategies.totals import TotalsStrategy
 from core.schemas import GameState, MarketState
@@ -71,10 +70,6 @@ class TestTimeAdjustedThreshold:
 
 class TestStrategyQuarterMultipliers:
 
-    def test_moneyline_stores_multipliers(self):
-        s = MoneylineStrategy(ev_threshold=0.04, quarter_multipliers=Q_MULTS)
-        assert s._quarter_multipliers == Q_MULTS
-
     def test_totals_stores_multipliers(self):
         s = TotalsStrategy(ev_threshold=0.04, quarter_multipliers=Q_MULTS)
         assert s._quarter_multipliers == Q_MULTS
@@ -82,17 +77,6 @@ class TestStrategyQuarterMultipliers:
     def test_player_props_stores_multipliers(self):
         s = PlayerPropStrategy(ev_threshold=0.04, quarter_multipliers=Q_MULTS)
         assert s._quarter_multipliers == Q_MULTS
-
-    def test_moneyline_q1_rejects_marginal(self):
-        """Q1 with small diff: model prob ~0.57 at 48c ask → EV ~0.09,
-        but Q1 threshold is 0.10 so it's rejected."""
-        s = MoneylineStrategy(ev_threshold=0.04, quarter_multipliers=Q_MULTS)
-        game = make_game_state(quarter=1, home_score=26, away_score=28)
-        game = game.model_copy(update={"clock": "10:00"})
-        market = make_market_state(
-            ticker="KXNBAGAME-04MAR26-DENLAL-DEN", yes_bid=47, yes_ask=48,
-        )
-        assert s.evaluate(game, market) is None
 
     def test_player_props_high_threshold_rejects(self):
         """With base_threshold=0.50 (absurdly high), Q1 threshold > 1.0 — always rejects."""
@@ -273,12 +257,6 @@ class TestLateGameFlyerFilter:
         market = make_market_state(
             ticker="KXNBA-PLAYERPTS-04MAR26-LJAMES-O20", yes_bid=43, yes_ask=45,
         )
-        # At 45c yes_ask, LeBron has 10pts and needs 20 — plausible; not filtered
-        result = s.evaluate(game, market)
-        # May or may not return a signal based on EV, but should NOT be filtered by price
-        # The only way it returns None here is EV, not price filter
-        # We verify the price filter alone is bypassed by checking no None from price check
-        # (EV rejection is still possible — just not the price guard)
         pass  # No assertion on result — we care it doesn't crash or filter incorrectly
 
     def test_cheap_prop_always_blocked_below_15c(self):
@@ -305,97 +283,155 @@ class TestLateGameFlyerFilter:
         market = make_market_state(
             ticker="KXNBA-PLAYERPTS-04MAR26-LJAMES-O30", yes_bid=18, yes_ask=20,
         )
-        # Not filtered by price guard (team_minutes>=24 bypasses the first-half guard,
-        # and yes_ask=20 >= 15 bypasses the all-times guard).
-        # EV may still reject — we just confirm no crash.
         s.evaluate(game, market)  # should not raise
 
 
 # ===========================================================================
-# Phase 4: First-Half Strategy
+# Phase 4: Arbitrage Strategy
 # ===========================================================================
 
-_1H_TICKER = "KXNBA-1H-04MAR26-DENLAL-LAL"
-_1H_TICKER_HALF = "KXNBA-HALF-04MAR26-DENLAL-LAL"
-_FULLGAME_TICKER = "KXNBAGAME-04MAR26-DENLAL-LAL"
+def _make_arb_market(
+    ticker: str = "KXNBAGAME-04MAR26-DENLAL-LAL",
+    yes_ask: int = 45,
+    no_ask: int = 48,
+) -> MarketState:
+    return make_market_state(ticker=ticker, yes_ask=yes_ask, no_ask=no_ask)
 
 
-class TestFirstHalfCanEvaluate:
+class TestArbitrageCanEvaluate:
 
-    def test_matches_1h_ticker(self):
-        s = FirstHalfStrategy()
-        assert s.can_evaluate(make_market_state(ticker=_1H_TICKER))
-
-    def test_matches_half_ticker(self):
-        s = FirstHalfStrategy()
-        assert s.can_evaluate(make_market_state(ticker=_1H_TICKER_HALF))
-
-    def test_rejects_full_game_ticker(self):
-        s = FirstHalfStrategy()
-        assert not s.can_evaluate(make_market_state(ticker=_FULLGAME_TICKER))
+    def test_accepts_kxnba_market_with_two_sided_quotes(self):
+        s = ArbitrageStrategy()
+        assert s.can_evaluate(_make_arb_market())
 
     def test_rejects_non_nba_ticker(self):
-        s = FirstHalfStrategy()
-        assert not s.can_evaluate(make_market_state(ticker="NFL-1H-KC-SF"))
+        s = ArbitrageStrategy()
+        assert not s.can_evaluate(_make_arb_market(ticker="NFL-SPREAD-KC-SF"))
+
+    def test_rejects_zero_yes_ask(self):
+        s = ArbitrageStrategy()
+        assert not s.can_evaluate(_make_arb_market(yes_ask=0))
+
+    def test_rejects_zero_no_ask(self):
+        s = ArbitrageStrategy()
+        assert not s.can_evaluate(_make_arb_market(no_ask=0))
 
 
-class TestFirstHalfEvaluate:
+class TestArbitrageEvaluate:
 
-    def test_q3_returns_none(self):
-        """First half is over — strategy must not fire in Q3."""
-        s = FirstHalfStrategy(ev_threshold=0.01)
-        game = make_game_state(quarter=3, home_score=50, away_score=45)
-        market = make_market_state(ticker=_1H_TICKER, yes_bid=45, yes_ask=47)
-        assert s.evaluate(game, market) is None
-
-    def test_q4_returns_none(self):
-        s = FirstHalfStrategy(ev_threshold=0.01)
-        game = make_game_state(quarter=4, home_score=90, away_score=88)
-        market = make_market_state(ticker=_1H_TICKER, yes_bid=60, yes_ask=62)
-        assert s.evaluate(game, market) is None
-
-    def test_q1_tied_game_no_edge(self):
-        """Tied game → model prob ~0.50, no edge against 50c market."""
-        s = FirstHalfStrategy(ev_threshold=0.03)
-        game = make_game_state(quarter=1, home_score=10, away_score=10)
-        market = make_market_state(ticker=_1H_TICKER, yes_bid=49, yes_ask=51)
-        assert s.evaluate(game, market) is None
-
-    def test_q2_large_home_lead_fires_signal(self):
-        """Home team leads 15 in Q2 → model prob >> market price → +EV signal."""
-        s = FirstHalfStrategy(ev_threshold=0.03, target_exit_spread=7)
-        # LAL is home, DEN is away; LAL leads by 15
-        game = make_game_state(quarter=2, home_score=50, away_score=35)
-        market = make_market_state(ticker=_1H_TICKER, yes_bid=75, yes_ask=77)
+    def test_fires_when_combined_below_threshold(self):
+        """YES=45 + NO=48 = 93c < 95c max → arb opportunity."""
+        s = ArbitrageStrategy(max_combined_cents=95)
+        game = make_game_state()
+        market = _make_arb_market(yes_ask=45, no_ask=48)
         result = s.evaluate(game, market)
         assert result is not None
-        assert result.source == "first_half"
-        assert result.entry_price == 77
-        assert result.exit_price == 84  # 77 + 7
-        assert result.confidence > 0.85
-        assert result.ev_estimate > 0.03
+        assert result.source == "arbitrage"
+        assert result.entry_price == 45
+        assert result.no_entry_price == 48
 
-    def test_q1_small_lead_below_threshold(self):
-        """Home leads by 3 in Q1 — model prob ~64.5%; market priced at 62c → EV ~2.5c < 5c threshold."""
-        s = FirstHalfStrategy(ev_threshold=0.05)
-        game = make_game_state(quarter=1, home_score=14, away_score=11)
-        # yes_ask=62 → EV ≈ 0.645 - 0.62 = 0.025 < 0.05 threshold
-        market = make_market_state(ticker=_1H_TICKER, yes_bid=60, yes_ask=62)
+    def test_rejects_when_combined_above_threshold(self):
+        """YES=50 + NO=48 = 98c > 95c → not an arb."""
+        s = ArbitrageStrategy(max_combined_cents=95)
+        game = make_game_state()
+        market = _make_arb_market(yes_ask=50, no_ask=48)
         assert s.evaluate(game, market) is None
 
-    def test_away_team_ticker_target(self):
-        """Ticker targets DEN (away) — should use 1 - home_prob."""
-        den_ticker = "KXNBA-1H-04MAR26-DENLAL-DEN"
-        s = FirstHalfStrategy(ev_threshold=0.01)
-        # DEN (away) leads by 20 in Q2 → DEN win prob should be very high
-        game = make_game_state(quarter=2, home_score=30, away_score=50)
-        market = make_market_state(ticker=den_ticker, yes_bid=88, yes_ask=90)
+    def test_rejects_when_net_spread_below_one_cent(self):
+        """Combined=93c but fees consume the spread → net < 1c → rejected.
+
+        YES=46 NO=47 → gross=7c.
+        fee_yes = ceil(0.07 * 46 * 54 / 100) = ceil(1.74) = 2
+        fee_no  = ceil(0.07 * 47 * 53 / 100) = ceil(1.74) = 2
+        net = 7 - 2 - 2 = 3c → still fires; adjust to a tighter spread.
+
+        YES=48 NO=49 → gross=3c.
+        fee_yes = ceil(0.07 * 48 * 52 / 100) = ceil(1.75) = 2
+        fee_no  = ceil(0.07 * 49 * 51 / 100) = ceil(1.75) = 2
+        net = 3 - 2 - 2 = -1c → rejected.
+        """
+        s = ArbitrageStrategy(max_combined_cents=99)
+        game = make_game_state()
+        market = _make_arb_market(yes_ask=48, no_ask=49)
+        assert s.evaluate(game, market) is None
+
+    def test_ev_equals_net_spread_over_100(self):
+        """ev_estimate should equal net_spread / 100."""
+        import math
+        s = ArbitrageStrategy(max_combined_cents=95)
+        game = make_game_state()
+        market = _make_arb_market(yes_ask=40, no_ask=50)
         result = s.evaluate(game, market)
         assert result is not None
-        assert result.confidence > 0.90
+        gross = 100 - 40 - 50
+        fee_yes = math.ceil(0.07 * 40 * 60 / 100)
+        fee_no = math.ceil(0.07 * 50 * 50 / 100)
+        expected_ev = (gross - fee_yes - fee_no) / 100.0
+        assert result.ev_estimate == pytest.approx(expected_ev, abs=1e-9)
 
-    def test_zero_ask_returns_none(self):
-        s = FirstHalfStrategy()
-        game = make_game_state(quarter=1)
-        market = make_market_state(ticker=_1H_TICKER, yes_bid=0, yes_ask=0)
+    def test_no_entry_price_set_on_signal(self):
+        """Companion NO price must be propagated to signal."""
+        s = ArbitrageStrategy(max_combined_cents=95)
+        game = make_game_state()
+        market = _make_arb_market(yes_ask=44, no_ask=46)
+        result = s.evaluate(game, market)
+        assert result is not None
+        assert result.no_entry_price == 46
+
+    def test_confidence_fixed_at_0_62(self):
+        s = ArbitrageStrategy(max_combined_cents=95)
+        game = make_game_state()
+        market = _make_arb_market(yes_ask=44, no_ask=46)
+        result = s.evaluate(game, market)
+        assert result is not None
+        assert result.confidence == pytest.approx(0.62)
+
+    def test_rejects_zero_yes_ask(self):
+        s = ArbitrageStrategy()
+        game = make_game_state()
+        market = _make_arb_market(yes_ask=0, no_ask=50)
+        assert s.evaluate(game, market) is None
+
+    def test_exit_price_is_99(self):
+        """Arb holds to settlement; exit_price=99 triggers auto-cashout."""
+        s = ArbitrageStrategy(max_combined_cents=95)
+        game = make_game_state()
+        market = _make_arb_market(yes_ask=44, no_ask=46)
+        result = s.evaluate(game, market)
+        assert result is not None
+        assert result.exit_price == 99
+
+
+# ===========================================================================
+# Phase 5: Totals Q1 block and min_minutes guard
+# ===========================================================================
+
+class TestTotalsQ1Block:
+
+    def test_q1_returns_none(self):
+        """Totals strategy must not fire in Q1 (too little pace data)."""
+        s = TotalsStrategy(ev_threshold=0.01, min_minutes=1.0)
+        game = make_game_state(quarter=1, home_score=15, away_score=12)
+        market = make_market_state(ticker="KXNBATOTAL-04MAR26-DENLAL-O215", yes_ask=40)
+        assert s.evaluate(game, market) is None
+
+    def test_q5_overtime_returns_none(self):
+        s = TotalsStrategy(ev_threshold=0.01, min_minutes=1.0)
+        game = make_game_state(quarter=5, home_score=100, away_score=98)
+        market = make_market_state(ticker="KXNBATOTAL-04MAR26-DENLAL-O215", yes_ask=60)
+        assert s.evaluate(game, market) is None
+
+    def test_q2_below_min_minutes_returns_none(self):
+        """12-minute minimum not yet met → skip evaluation."""
+        s = TotalsStrategy(ev_threshold=0.01, min_minutes=12.0)
+        # team_minutes_played sums player minutes; make_game_state uses default 6-minute players
+        # Use a fresh game with very few minutes
+        game = make_game_state(quarter=2, home_score=5, away_score=4)
+        # Override player stats to have very few minutes
+        from tests.conftest import make_player_box_score
+        p1 = make_player_box_score(minutes=2.0, pts=3, team_abbr="LAL")
+        p2 = make_player_box_score(player_id="2", first_name="A", last_name="B",
+                                   team_abbr="LAL", minutes=2.0, pts=2)
+        game = game.model_copy(update={"player_stats": [p1, p2]})
+        market = make_market_state(ticker="KXNBATOTAL-04MAR26-DENLAL-O215", yes_ask=50)
         assert s.evaluate(game, market) is None

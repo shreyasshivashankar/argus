@@ -14,8 +14,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agents.strategies.first_half import FirstHalfStrategy
-from agents.strategies.moneyline import MoneylineStrategy
 from agents.strategies.player_props import PlayerPropStrategy
 from agents.strategies.totals import TotalsStrategy
 from core.schemas import (
@@ -36,40 +34,6 @@ from tests.conftest import (
     make_portfolio_position,
     make_portfolio_state,
 )
-
-
-# ===========================================================================
-# model_probability — MoneylineStrategy
-# ===========================================================================
-
-class TestMoneylineModelProbability:
-    def _make_strategy(self):
-        return MoneylineStrategy(ev_threshold=0.03, target_exit_spread=7)
-
-    def test_returns_float_for_valid_game(self):
-        strat = self._make_strategy()
-        game = make_game_state(home_score=80, away_score=85, quarter=3)
-        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
-        market = make_market_state(ticker="KXNBA-GAME-LAL-DEN-LAL", yes_ask=40)
-        prob = strat.model_probability(game, market)
-        assert prob is not None
-        assert 0.0 < prob < 1.0
-
-    def test_returns_none_for_zero_ask(self):
-        strat = self._make_strategy()
-        game = make_game_state()
-        market = make_market_state(yes_ask=0)
-        assert strat.model_probability(game, market) is None
-
-    def test_home_team_high_prob_when_leading_late(self):
-        """LAL leading by 10 in Q4 → high P(LAL wins)."""
-        strat = self._make_strategy()
-        game = make_game_state(home_score=90, away_score=80, quarter=4)
-        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
-        market = make_market_state(ticker="KXNBA-GAME-LAL-DEN-LAL", yes_ask=85)
-        prob = strat.model_probability(game, market)
-        assert prob is not None
-        assert prob > 0.80
 
 
 # ===========================================================================
@@ -156,46 +120,6 @@ class TestPlayerPropModelProbability:
 
 
 # ===========================================================================
-# model_probability — FirstHalfStrategy
-# ===========================================================================
-
-class TestFirstHalfModelProbability:
-    def _make_strategy(self):
-        return FirstHalfStrategy(ev_threshold=0.03, target_exit_spread=7)
-
-    def test_returns_float_in_q1(self):
-        strat = self._make_strategy()
-        game = make_game_state(home_score=20, away_score=15, quarter=1)
-        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
-        market = make_market_state(ticker="KXNBA-1H-LAL-DEN-LAL", yes_ask=55)
-        prob = strat.model_probability(game, market)
-        assert prob is not None
-        assert 0.0 < prob < 1.0
-
-    def test_returns_float_in_q2(self):
-        strat = self._make_strategy()
-        game = make_game_state(home_score=35, away_score=28, quarter=2)
-        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
-        market = make_market_state(ticker="KXNBA-1H-LAL-DEN-LAL", yes_ask=65)
-        prob = strat.model_probability(game, market)
-        assert prob is not None
-        assert prob > 0.5
-
-    def test_returns_none_in_q3(self):
-        """First half is over — strategy should return None."""
-        strat = self._make_strategy()
-        game = make_game_state(quarter=3)
-        market = make_market_state(ticker="KXNBA-1H-LAL-DEN-LAL", yes_ask=60)
-        assert strat.model_probability(game, market) is None
-
-    def test_returns_none_in_q4(self):
-        strat = self._make_strategy()
-        game = make_game_state(quarter=4)
-        market = make_market_state(ticker="KXNBA-1H-LAL-DEN-LAL", yes_ask=60)
-        assert strat.model_probability(game, market) is None
-
-
-# ===========================================================================
 # NBAQuantAgent._find_game_for_ticker
 # ===========================================================================
 
@@ -240,21 +164,21 @@ class TestCheckBailout:
     ):
         agent = self._make_agent(settings, mock_bus, mock_client)
 
-        game = make_game_state(game_id="game-001", home_score=90, away_score=80, quarter=4)
-        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        # Bought OVER 220 in Q3, but game is going very slowly.
+        # Q3 (30.5 team-minutes), score=30+25=55 → pace ~1.8/min → projected ~86
+        # P(over 220) ≈ 0% → fair_value ≈ 0c
+        # Market still bids 70c → threshold = 70-15=55 → 0 < 55 → bailout fires
+        game = make_game_state(game_id="game-001", home_score=30, away_score=25, quarter=3)
         agent._games["game-001"] = game
-        agent._game_to_tickers["game-001"] = ["KXNBA-GAME-LAL-DEN-DEN"]
+        agent._game_to_tickers["game-001"] = ["KXNBATOTAL-04MAR26-LALDAL-O220"]
 
-        # Market has moved: yes_bid=70c (market thinks DEN has 70% chance)
-        # But model (LAL leads by 10 in Q4) thinks DEN only has ~15% → fair=15c
-        # 15 <= 70 - 15 = 55 → bailout fires
         market = make_market_state(
-            ticker="KXNBA-GAME-LAL-DEN-DEN", yes_bid=70, yes_ask=72
+            ticker="KXNBATOTAL-04MAR26-LALDAL-O220", yes_bid=70, yes_ask=72
         )
-        agent._markets["KXNBA-GAME-LAL-DEN-DEN"] = market
+        agent._markets["KXNBATOTAL-04MAR26-LALDAL-O220"] = market
 
         pos = make_portfolio_position(
-            ticker="KXNBA-GAME-LAL-DEN-DEN",
+            ticker="KXNBATOTAL-04MAR26-LALDAL-O220",
             side=Side.YES,
             remaining_count=10,
             entry_vwap=30.0,
@@ -268,7 +192,7 @@ class TestCheckBailout:
         channel, signal = mock_bus.publish.call_args[0]
         assert channel == "signal:bailout"
         assert signal.status == SignalStatus.BAILOUT
-        assert signal.ticker == "KXNBA-GAME-LAL-DEN-DEN"
+        assert signal.ticker == "KXNBATOTAL-04MAR26-LALDAL-O220"
         assert signal.entry_price == 70  # current bid
 
     @pytest.mark.asyncio
@@ -359,25 +283,26 @@ class TestCheckBailout:
     async def test_no_side_bailout_uses_no_bid(
         self, settings, mock_bus, mock_client
     ):
-        """For a Side.NO position, bailout must use no_bid and P(NO) = 1 - P(YES)."""
+        """For a Side.NO position, bailout must use no_bid and P(NO) = 1 - P(YES).
+
+        We hold NO on an OVER 215 ticker (bet the under), but the game is blazing fast.
+        Q3 (30.5 team-minutes), score=120+110=230 → pace ~7.5/min → projected ~362.
+        P(over 215) ≈ 100% → P(NO=under) ≈ 0% → fair_value ≈ 0c.
+        no_bid=65c: threshold = 65-15=50 → 0 < 50 → bailout fires using no_bid.
+        """
         from core.schemas import MarketState
         from datetime import datetime
 
         agent = self._make_agent(settings, mock_bus, mock_client)
 
-        # DEN trails by 10 in Q4 → P(LAL wins YES) ≈ 88% → P(DEN wins NO) ≈ 12%
-        game = make_game_state(game_id="game-001", home_score=90, away_score=80, quarter=4)
-        game = game.model_copy(update={"home_abbr": "LAL", "away_abbr": "DEN"})
+        game = make_game_state(game_id="game-001", home_score=120, away_score=110, quarter=3)
         agent._games["game-001"] = game
+        agent._game_to_tickers["game-001"] = ["KXNBATOTAL-04MAR26-LALDAL-O215"]
 
-        # Ticker is LAL game-winner; we hold NO (we bet LAL would lose)
-        agent._game_to_tickers["game-001"] = ["KXNBA-GAME-LAL-DEN-LAL"]
-
-        # no_bid=65c: market thinks P(LAL loses/NO) = 65%
-        # Our model: P(LAL YES) ≈ 88% → P(NO) ≈ 12%
-        # 12 <= 65 - 15 = 50 → bailout fires
+        # Market still has no_bid=65 (slow to update); yes_bid=30 (over likely)
+        # P(over) ≈ 100% → P(NO) ≈ 0% → bailout fires
         market = MarketState(
-            ticker="KXNBA-GAME-LAL-DEN-LAL",
+            ticker="KXNBATOTAL-04MAR26-LALDAL-O215",
             yes_bid=30,
             yes_ask=32,
             no_bid=65,
@@ -385,10 +310,10 @@ class TestCheckBailout:
             volume=100,
             timestamp=datetime.utcnow(),
         )
-        agent._markets["KXNBA-GAME-LAL-DEN-LAL"] = market
+        agent._markets["KXNBATOTAL-04MAR26-LALDAL-O215"] = market
 
         pos = make_portfolio_position(
-            ticker="KXNBA-GAME-LAL-DEN-LAL",
+            ticker="KXNBATOTAL-04MAR26-LALDAL-O215",
             side=Side.NO,
             remaining_count=10,
             entry_vwap=50.0,

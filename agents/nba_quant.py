@@ -17,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from agents.strategies import FirstHalfStrategy, FlashCrashStrategy, MoneylineStrategy, PlayerPropStrategy, TotalsStrategy
+from agents.strategies import ArbitrageStrategy, FlashCrashStrategy, PlayerPropStrategy, TotalsStrategy
 from agents.strategies.base import BaseStrategy
 from core.base_agent import BaseAgent
 from core.bus import SignalBus
@@ -62,21 +62,24 @@ class NBAQuantAgent(BaseAgent):
         )
 
         self._strategies: list[BaseStrategy] = strategies or [
-            MoneylineStrategy(
-                ev_threshold=ev_base,
-                target_exit_spread=settings.TARGET_EXIT_SPREAD,
-                quarter_multipliers=q_mults,
+            # Arbitrage: risk-free when YES_ask + NO_ask < threshold
+            ArbitrageStrategy(
+                max_combined_cents=settings.ARB_MAX_COMBINED_CENTS,
             ),
+            # Totals: pace-projection over/under (Q2+ only, stable data)
             TotalsStrategy(
                 ev_threshold=ev_base,
                 target_exit_spread=settings.TARGET_EXIT_SPREAD,
                 quarter_multipliers=q_mults,
+                min_minutes=settings.TOTALS_MIN_MINUTES,
             ),
+            # Player props: usage-weighted points projection
             PlayerPropStrategy(
                 ev_threshold=ev_base,
                 target_exit_spread=settings.TARGET_EXIT_SPREAD,
                 quarter_multipliers=q_mults,
             ),
+            # Flash crash: mean-reversion on panic sell-offs
             FlashCrashStrategy(
                 window_seconds=settings.FLASH_CRASH_WINDOW_SECONDS,
                 drop_threshold_cents=settings.FLASH_CRASH_DROP_CENTS,
@@ -84,10 +87,8 @@ class NBAQuantAgent(BaseAgent):
                 min_price_cents=settings.FLASH_CRASH_MIN_PRICE,
                 score_delta_limit=settings.FLASH_CRASH_SCORE_DELTA_LIMIT,
             ),
-            FirstHalfStrategy(
-                ev_threshold=ev_base,
-                target_exit_spread=settings.TARGET_EXIT_SPREAD,
-            ),
+            # MoneylineStrategy — DISABLED: data latency kills edge, caused blowup
+            # FirstHalfStrategy — DISABLED: correlated spread variants caused blowup
         ]
 
         self._games: dict[str, GameState] = {}
@@ -111,6 +112,12 @@ class NBAQuantAgent(BaseAgent):
 
         # Per-ticker bailout cooldown: prevent hammering the same position
         self._bailout_cooldowns: dict[str, datetime] = {}
+
+        # Per-game pending lock: set immediately when a signal is published,
+        # cleared when portfolio:state confirms a position for that game.
+        # Prevents multiple signals firing for the same game before the first
+        # fill/portfolio update arrives (race condition with MAX_GAME_EXPOSURE).
+        self._pending_game_orders: set[str] = set()
 
     # ------------------------------------------------------------------
     # Main loop
@@ -160,6 +167,14 @@ class NBAQuantAgent(BaseAgent):
     def _update_portfolio(self, data: dict) -> None:
         try:
             self._portfolio = PortfolioState(**data)
+            # Clear pending locks for games whose positions are now confirmed.
+            if self._portfolio.positions and self._pending_game_orders:
+                confirmed_tickers = {pos.ticker for pos in self._portfolio.positions}
+                cleared = {
+                    gid for gid in self._pending_game_orders
+                    if set(self._game_to_tickers.get(gid, [])) & confirmed_tickers
+                }
+                self._pending_game_orders -= cleared
         except Exception:
             self.log.warning("Bad portfolio:state payload: {}", data)
 
@@ -226,14 +241,21 @@ class NBAQuantAgent(BaseAgent):
         if last and (now - last).total_seconds() < 60:
             return False
 
-        # --- Per-game exposure cap (98c cashouts free slots automatically) ---
-        if self._get_game_exposure(game.game_id) >= self.settings.MAX_GAME_EXPOSURE:
-            return False
+        # --- Per-game exposure cap ---
+        # Arbitrage bypasses both checks: it's risk-free and needs both YES + NO
+        # to fire on the same game. All other strategies enforce the pending lock
+        # (race-condition guard) and the portfolio exposure cap.
+        if signal.source != "arbitrage":
+            if game.game_id in self._pending_game_orders:
+                return False
+            if self._get_game_exposure(game.game_id) >= self.settings.MAX_GAME_EXPOSURE:
+                return False
 
         entry_price_cents = signal.entry_price
 
         if self._can_fund_trade(entry_price_cents):
             self._signal_cooldowns[signal.ticker] = now
+            self._pending_game_orders.add(game.game_id)
             await self.bus.publish("signal:validated", signal)
             self.log.info(
                 "+EV signal [{}]: {} EV={:.4f} entry={} exit={} conf={:.3f}",

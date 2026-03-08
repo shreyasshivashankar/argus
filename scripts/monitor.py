@@ -74,13 +74,13 @@ class ArgusMonitor:
         now = datetime.utcnow().strftime("%H:%M:%S")
 
         if channel == "signal:executed":
+            pnl = float(data.get("ev_estimate", 0))
             entry = int(data.get("entry_price", 0))
             exit_ = int(data.get("exit_price", 0))
-            pnl = (exit_ - entry) / 100.0
             self.total_pnl += pnl
-            if exit_ > entry:
+            if pnl > 0:
                 self.wins += 1
-            elif exit_ < entry:
+            elif pnl < 0:
                 self.losses += 1
             self.trades.insert(0, {
                 "time": now,

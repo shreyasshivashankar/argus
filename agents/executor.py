@@ -404,7 +404,45 @@ class OrderExecutor(BaseAgent):
         if signal.source == "flash_crash":
             self._flash_crash_entries.add(order.client_order_id)
 
+        # Arbitrage: immediately place the companion NO-side order
+        if signal.source == "arbitrage" and signal.no_entry_price:
+            await self._place_arb_no_leg(signal, count)
+
         await self._replay_deferred_fills()
+
+    async def _place_arb_no_leg(self, signal: Signal, count: int) -> None:
+        """Place the paired NO order for an arbitrage signal."""
+        no_price = signal.no_entry_price + self.settings.SLIPPAGE_TICKS
+        no_order = Order(
+            ticker=signal.ticker,
+            action=Action.BUY,
+            side=Side.NO,
+            count=count,
+            no_price=no_price,
+        )
+        managed = ManagedOrder(
+            order=no_order,
+            state=OrderState.PLACED,
+            signal_id=signal.signal_id,
+            is_exit=False,
+        )
+        self._orders[no_order.client_order_id] = managed
+        bet_dollars = (count * no_price) / 100.0
+        self.current_bankroll -= bet_dollars
+        try:
+            resp = await self.client.place_order(no_order)
+            kalshi_id = resp.get("order", {}).get("order_id", "")
+            managed.kalshi_order_id = kalshi_id
+            self._kalshi_to_client[kalshi_id] = no_order.client_order_id
+            self.log.info(
+                "Arb NO leg placed: {} no x{} @{} (kalshi_id={}) spread={}c",
+                signal.ticker, count, no_price, kalshi_id,
+                100 - signal.entry_price - signal.no_entry_price,
+            )
+        except Exception:
+            self.log.exception("Failed to place arb NO leg for {}", signal.ticker)
+            managed.state = OrderState.CANCELED
+            self.current_bankroll += bet_dollars
 
     # ------------------------------------------------------------------
     # Reallocation (liquidate resting exit to free capital)
@@ -885,8 +923,8 @@ class OrderExecutor(BaseAgent):
         entry_cents = signal.entry_price
 
         # Global firewall: deep longshots cause Kelly to explode and are
-        # operationally illiquid. Reject below 15c unconditionally.
-        if entry_cents < 15 or entry_cents >= 100:
+        # operationally illiquid. Reject below MIN_ENTRY_PRICE_CENTS.
+        if entry_cents < self.settings.MIN_ENTRY_PRICE_CENTS or entry_cents >= 100:
             return 0
 
         p = signal.confidence

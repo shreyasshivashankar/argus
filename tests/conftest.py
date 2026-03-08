@@ -63,6 +63,7 @@ def settings() -> AppSettings:
         BAILOUT_MARGIN_CENTS=15,
         BAILOUT_POLL_INTERVAL=10.0,
         MAX_POSITION_PCT_BANKROLL=0.10,
+        MIN_ENTRY_PRICE_CENTS=15,
     )
 
 
@@ -241,13 +242,15 @@ def make_market_state(
     ticker: str = "NBA-YES-LAL",
     yes_bid: int = 14,
     yes_ask: int = 16,
+    no_bid: int = 0,
+    no_ask: int = 0,
 ) -> MarketState:
     return MarketState(
         ticker=ticker,
         yes_bid=yes_bid,
         yes_ask=yes_ask,
-        no_bid=0,
-        no_ask=0,
+        no_bid=no_bid,
+        no_ask=no_ask,
         volume=100,
         timestamp=datetime.utcnow(),
     )
