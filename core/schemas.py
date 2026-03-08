@@ -297,3 +297,6 @@ class AppSettings(BaseSettings):
 
     # Totals: minimum team-minutes played before firing (ensures stable pace data)
     TOTALS_MIN_MINUTES: float = 12.0
+
+    # Per-sport strategy toggles (comma-separated strategy names)
+    NBA_ENABLED_STRATEGIES: str = "totals,player_props,arbitrage,flash_crash"

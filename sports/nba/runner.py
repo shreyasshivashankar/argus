@@ -1,14 +1,9 @@
-"""Argus — Production Kalshi Trading Bot
-
-Universal launcher that routes to sport-specific modules.
+"""Standalone NBA runner — run the NBA bot independently.
 
 Usage:
-    python main.py --sport nba --env demo --paper
-    python main.py --sport nba --env prod
-    python main.py --sport nba --env prod --track
-
-For standalone sport runners:
+    python -m sports.nba.runner --env demo --paper
     python -m sports.nba.runner --env prod
+    python -m sports.nba.runner --env prod --track
 """
 from __future__ import annotations
 
@@ -27,42 +22,33 @@ from agents.track_agent import TrackAgent
 from core.bus import SignalBus
 from core.client import KalshiAsyncClient
 from core.schemas import AppSettings
+from sports.nba.feed import BallDontLieFeed
+from sports.nba.quant import NBAQuantAgent
 from watchers.kalshi_feed import KalshiFeedWatcher
-
-# Import sport modules so they register themselves
-import sports.nba  # noqa: F401
-from sports import get_sport
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Argus Kalshi Trading Bot")
-    parser.add_argument(
-        "--sport",
-        default="nba",
-        help="Sport module to run (default: nba)",
-    )
+    parser = argparse.ArgumentParser(description="Argus NBA Trading Bot")
     parser.add_argument(
         "--env",
         choices=["demo", "prod"],
         default=None,
-        help="Kalshi environment: 'demo' (fake money) or 'prod' (real money). "
-             "Overrides KALSHI_ENV in .env",
+        help="Kalshi environment: 'demo' or 'prod'. Overrides KALSHI_ENV in .env",
     )
     parser.add_argument(
         "--paper",
         action="store_true",
-        help="Run in paper trading mode (simulated matching engine, no real orders)",
+        help="Paper trading mode (simulated matching, no real orders)",
     )
     parser.add_argument(
         "--track",
         action="store_true",
-        help="Enable trade tracker (persists all trades to Postgres)",
+        help="Enable trade tracker (persists trades to Postgres)",
     )
     return parser.parse_args()
 
 
 async def main(
-    sport_name: str = "nba",
     paper_mode: bool = False,
     env_override: str | None = None,
     track_mode: bool = False,
@@ -70,30 +56,26 @@ async def main(
     if env_override:
         os.environ["KALSHI_ENV"] = env_override
 
-    # --- Configuration ---
     settings = AppSettings()  # type: ignore[call-arg]
 
     mode_label = "PAPER" if paper_mode else "LIVE"
 
     logger.remove()
     logger.add(sys.stderr, level="INFO")
-    logger.add("logs/argus.log", rotation="50 MB", retention="2 days", level="DEBUG", enqueue=True)
-    logger.info("Argus starting — sport={}, env={}, mode={}", sport_name, settings.KALSHI_ENV, mode_label)
-
-    # --- Sport module ---
-    sport = get_sport(sport_name)
+    logger.add("logs/nba.log", rotation="50 MB", retention="2 days", level="DEBUG", enqueue=True)
+    logger.info("NBA bot starting — env={}, mode={}", settings.KALSHI_ENV, mode_label)
 
     # --- Core infrastructure ---
     bus = SignalBus(settings.REDIS_URL)
     client = KalshiAsyncClient(settings)
 
     # --- Watchers ---
-    sports_feed = sport.create_feed(settings, bus)
-    logger.info("Using {} feed for sport={}", type(sports_feed).__name__, sport_name)
+    sports_feed = BallDontLieFeed(settings, bus)
+    logger.info("Using BallDontLieFeed (GOAT, ~500 req/min)")
     kalshi_feed = KalshiFeedWatcher(client, bus)
 
     # --- Agents ---
-    quant_agent = sport.create_quant_agent(settings, bus, client)
+    nba_quant = NBAQuantAgent(settings, bus, client)
     narrative = NarrativeAgent(settings, bus, client)
 
     if paper_mode:
@@ -124,14 +106,13 @@ async def main(
     tasks = [
         asyncio.create_task(sports_feed.run(), name="sports_feed"),
         asyncio.create_task(kalshi_feed.run(), name="kalshi_feed"),
-        asyncio.create_task(quant_agent.start(), name="quant_agent"),
+        asyncio.create_task(nba_quant.start(), name="nba_quant"),
         asyncio.create_task(narrative.start(), name="narrative"),
         asyncio.create_task(executor.start(), name="executor"),
     ]
     if tracker:
         tasks.append(asyncio.create_task(tracker.start(), name="track"))
 
-    # Wait for shutdown signal
     await shutdown_event.wait()
 
     # --- Teardown ---
@@ -153,7 +134,7 @@ async def main(
 
     sports_feed.stop()
     kalshi_feed.stop()
-    quant_agent.stop()
+    nba_quant.stop()
     narrative.stop()
     executor.stop()
     if tracker:
@@ -162,7 +143,7 @@ async def main(
     await client.close()
     await bus.close()
 
-    logger.info("Argus shut down cleanly")
+    logger.info("NBA bot shut down cleanly")
 
 
 if __name__ == "__main__":
@@ -173,10 +154,5 @@ if __name__ == "__main__":
     except ImportError:
         pass
     asyncio.run(
-        main(
-            sport_name=args.sport,
-            paper_mode=args.paper,
-            env_override=args.env,
-            track_mode=args.track,
-        )
+        main(paper_mode=args.paper, env_override=args.env, track_mode=args.track)
     )

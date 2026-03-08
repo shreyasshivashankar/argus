@@ -1,4 +1,3 @@
-"""Backward-compat re-exports — strategies now live in sports.nba.strategies."""
 from sports.nba.strategies.arbitrage import ArbitrageStrategy
 from sports.nba.strategies.base import BaseStrategy
 from sports.nba.strategies.flash_crash import FlashCrashStrategy
