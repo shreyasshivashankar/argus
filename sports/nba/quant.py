@@ -34,6 +34,7 @@ from core.schemas import (
     Signal,
     SignalStatus,
 )
+from core.utils import MINUTES_PER_GAME, team_minutes_played
 
 
 class NBAQuantAgent(BaseAgent):
@@ -82,6 +83,9 @@ class NBAQuantAgent(BaseAgent):
         # Prevents multiple signals firing for the same game before the first
         # fill/portfolio update arrives (race condition with MAX_GAME_EXPOSURE).
         self._pending_game_orders: set[str] = set()
+
+        # Trailing stop: track peak bid per position (keyed by client_order_id)
+        self._peak_bids: dict[str, int] = {}
 
         self.log.info(
             "NBA strategies enabled: {}",
@@ -420,26 +424,26 @@ class NBAQuantAgent(BaseAgent):
         self.log.info("Mapped game {} → ticker {}", game_id, ticker)
 
     # ------------------------------------------------------------------
-    # EV-based bailout monitor
+    # Position protection: trailing stop, time exit, EV bailout
     # ------------------------------------------------------------------
 
     async def _manage_open_positions(self) -> None:
-        """Background loop: re-evaluate every open position every BAILOUT_POLL_INTERVAL.
+        """Background loop: protect every open position.
 
-        If the model's fair value has fallen well below the current bid
-        (meaning the market now agrees we are losing), fire an aggressive
-        BAILOUT sell to cut losses before the position expires worthless.
+        Checks (in priority order, first match wins):
+        1. Trailing stop — lock in profits when bid retraces from peak
+        2. Time exit — force-sell near end of Q4 to avoid binary expiry
+        3. EV bailout — cut losses when model says position is underwater
         """
         while self._running:
             await asyncio.sleep(self.settings.BAILOUT_POLL_INTERVAL)
             if not self._portfolio or not self._portfolio.positions:
                 continue
             for pos in list(self._portfolio.positions):
-                await self._check_bailout(pos)
+                await self._check_position(pos)
 
-    async def _check_bailout(self, pos: PortfolioPosition) -> None:
-        """Re-evaluate a single position; fire BAILOUT signal if warranted."""
-        # Per-ticker bailout cooldown (60 s) to avoid signal storms.
+    async def _check_position(self, pos: PortfolioPosition) -> None:
+        """Run all protection checks on a single position."""
         now = datetime.utcnow()
         last = self._bailout_cooldowns.get(pos.client_order_id)
         if last and (now - last).total_seconds() < 60:
@@ -450,11 +454,78 @@ class NBAQuantAgent(BaseAgent):
             return
 
         game = self._find_game_for_ticker(pos.ticker)
-        if game is None:
+
+        current_bid = market.yes_bid if pos.side == Side.YES else market.no_bid
+        if current_bid <= 0:
             return
 
-        # Ask every strategy that can price this market for its raw model prob.
-        # model_prob is always P(YES wins) regardless of our held side.
+        # --- 1. Trailing stop ---
+        if self._check_trailing_stop(pos, current_bid):
+            self._bailout_cooldowns[pos.client_order_id] = now
+            self.log.warning(
+                "TRAILING STOP: {} ({}) entry={:.0f}c peak={}c bid={}c — locking profit",
+                pos.ticker, pos.side, pos.entry_vwap,
+                self._peak_bids.get(pos.client_order_id, 0), current_bid,
+            )
+            await self._fire_exit_signal(pos, current_bid, game, "trailing_stop")
+            return
+
+        # --- 2. Time-based forced exit ---
+        if game is not None and self._check_time_exit(game):
+            self._bailout_cooldowns[pos.client_order_id] = now
+            minutes_left = MINUTES_PER_GAME - team_minutes_played(game)
+            self.log.warning(
+                "TIME EXIT: {} ({}) bid={}c — {:.1f} min left in Q4",
+                pos.ticker, pos.side, current_bid, minutes_left,
+            )
+            await self._fire_exit_signal(pos, current_bid, game, "time_exit")
+            return
+
+        # --- 3. EV-based bailout ---
+        if game is not None:
+            await self._check_ev_bailout(pos, market, game, current_bid, now)
+
+    def _check_trailing_stop(self, pos: PortfolioPosition, current_bid: int) -> bool:
+        """Return True if trailing stop should fire.
+
+        Activation: bid must be at least TRAILING_STOP_ACTIVATION_CENTS
+        above entry_vwap. Once activated, track peak bid.
+        Trigger: peak_bid - current_bid >= TRAILING_STOP_DISTANCE_CENTS.
+        """
+        entry = pos.entry_vwap
+        profit = current_bid - entry
+        activation = self.settings.TRAILING_STOP_ACTIVATION_CENTS
+
+        if profit < activation:
+            # Not yet profitable enough to trail; clear any stale peak
+            self._peak_bids.pop(pos.client_order_id, None)
+            return False
+
+        # Update peak bid
+        prev_peak = self._peak_bids.get(pos.client_order_id, current_bid)
+        peak = max(prev_peak, current_bid)
+        self._peak_bids[pos.client_order_id] = peak
+
+        distance = self.settings.TRAILING_STOP_DISTANCE_CENTS
+        return peak - current_bid >= distance
+
+    def _check_time_exit(self, game: GameState) -> bool:
+        """Return True if game is in Q4 with less than TIME_EXIT_MINUTES remaining."""
+        if game.quarter < 4:
+            return False
+        minutes_played = team_minutes_played(game)
+        minutes_remaining = MINUTES_PER_GAME - minutes_played
+        return minutes_remaining <= self.settings.TIME_EXIT_MINUTES
+
+    async def _check_ev_bailout(
+        self,
+        pos: PortfolioPosition,
+        market: MarketState,
+        game: GameState,
+        current_bid: int,
+        now: datetime,
+    ) -> None:
+        """Fire bailout if model fair value has fallen well below market bid."""
         model_prob: float | None = None
         for strategy in self._strategies:
             if strategy.can_evaluate(market):
@@ -465,18 +536,10 @@ class NBAQuantAgent(BaseAgent):
         if model_prob is None:
             return
 
-        # Side-aware fair value and current bid.
-        # If we hold YES: fair value = P(YES) cents, sell at yes_bid.
-        # If we hold NO:  fair value = P(NO) = (1 - P(YES)) cents, sell at no_bid.
         if pos.side == Side.YES:
-            current_bid = market.yes_bid
             fair_value_cents = model_prob * 100.0
         else:
-            current_bid = market.no_bid
             fair_value_cents = (1.0 - model_prob) * 100.0
-
-        if current_bid <= 0:
-            return
 
         bailout_threshold = current_bid - self.settings.BAILOUT_MARGIN_CENTS
 
@@ -485,21 +548,36 @@ class NBAQuantAgent(BaseAgent):
 
         self._bailout_cooldowns[pos.client_order_id] = now
         self.log.warning(
-            "BAILOUT triggered: {} ({}) fair={:.1f}c bid={}c threshold={}c — cutting loss",
+            "EV BAILOUT: {} ({}) fair={:.1f}c bid={}c threshold={}c — cutting loss",
             pos.ticker, pos.side, fair_value_cents, current_bid, bailout_threshold,
         )
+        await self._fire_exit_signal(
+            pos, current_bid, game, "ev_bailout",
+            confidence=fair_value_cents / 100.0,
+            ev_estimate=fair_value_cents / 100.0 - current_bid / 100.0,
+        )
 
+    async def _fire_exit_signal(
+        self,
+        pos: PortfolioPosition,
+        bid: int,
+        game: GameState | None,
+        reason: str,
+        confidence: float = 0.5,
+        ev_estimate: float = 0.0,
+    ) -> None:
+        """Publish a BAILOUT signal to force-sell a position at the bid."""
         signal = Signal(
             ticker=pos.ticker,
             action=Action.SELL,
             side=pos.side,
             status=SignalStatus.BAILOUT,
-            confidence=fair_value_cents / 100.0,
-            source=self.name,
-            ev_estimate=fair_value_cents / 100.0 - current_bid / 100.0,
-            entry_price=current_bid,
+            confidence=min(max(confidence, 0.0), 1.0),
+            source=f"{self.name}:{reason}",
+            ev_estimate=ev_estimate,
+            entry_price=bid,
             exit_price=pos.target_exit_price,
-            game_id=game.game_id,
+            game_id=game.game_id if game else "",
             target_order_id=pos.client_order_id,
         )
         await self.bus.publish("signal:bailout", signal)

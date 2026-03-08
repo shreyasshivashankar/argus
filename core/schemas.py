@@ -298,5 +298,12 @@ class AppSettings(BaseSettings):
     # Totals: minimum team-minutes played before firing (ensures stable pace data)
     TOTALS_MIN_MINUTES: float = 12.0
 
+    # Trailing stop: lock in profits when price retraces from peak
+    TRAILING_STOP_ACTIVATION_CENTS: int = 8   # Only trail after 8c profit above entry
+    TRAILING_STOP_DISTANCE_CENTS: int = 6     # Sell when bid drops 6c from peak
+
+    # Time-based forced exit: sell all positions near end of game
+    TIME_EXIT_MINUTES: float = 4.0  # Sell with < 4 min left in Q4
+
     # Per-sport strategy toggles (comma-separated strategy names)
     NBA_ENABLED_STRATEGIES: str = "totals,player_props,arbitrage,flash_crash"

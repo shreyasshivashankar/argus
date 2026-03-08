@@ -186,7 +186,7 @@ class TestCheckBailout:
         )
 
         mock_bus.publish = AsyncMock()
-        await agent._check_bailout(pos)
+        await agent._check_position(pos)
 
         mock_bus.publish.assert_called_once()
         channel, signal = mock_bus.publish.call_args[0]
@@ -222,7 +222,7 @@ class TestCheckBailout:
         )
 
         mock_bus.publish = AsyncMock()
-        await agent._check_bailout(pos)
+        await agent._check_position(pos)
         mock_bus.publish.assert_not_called()
 
     @pytest.mark.asyncio
@@ -251,9 +251,9 @@ class TestCheckBailout:
         )
 
         mock_bus.publish = AsyncMock()
-        await agent._check_bailout(pos)  # fires
+        await agent._check_position(pos)  # fires
         mock_bus.publish.reset_mock()
-        await agent._check_bailout(pos)  # should be suppressed by cooldown
+        await agent._check_position(pos)  # should be suppressed by cooldown
         mock_bus.publish.assert_not_called()
 
     @pytest.mark.asyncio
@@ -263,7 +263,7 @@ class TestCheckBailout:
         agent = self._make_agent(settings, mock_bus, mock_client)
         pos = make_portfolio_position(ticker="KXNBA-GAME-UNKNOWN")
         mock_bus.publish = AsyncMock()
-        await agent._check_bailout(pos)
+        await agent._check_position(pos)
         mock_bus.publish.assert_not_called()
 
     @pytest.mark.asyncio
@@ -276,7 +276,7 @@ class TestCheckBailout:
         pos = make_portfolio_position(ticker="KXNBA-GAME-LAL")
         # No game mapped
         mock_bus.publish = AsyncMock()
-        await agent._check_bailout(pos)
+        await agent._check_position(pos)
         mock_bus.publish.assert_not_called()
 
     @pytest.mark.asyncio
@@ -321,7 +321,7 @@ class TestCheckBailout:
         )
 
         mock_bus.publish = AsyncMock()
-        await agent._check_bailout(pos)
+        await agent._check_position(pos)
 
         mock_bus.publish.assert_called_once()
         channel, signal = mock_bus.publish.call_args[0]
@@ -364,7 +364,7 @@ class TestCheckBailout:
         )
 
         mock_bus.publish = AsyncMock()
-        await agent._check_bailout(pos)
+        await agent._check_position(pos)
         mock_bus.publish.assert_not_called()
 
 
