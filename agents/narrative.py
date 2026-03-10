@@ -162,6 +162,10 @@ class GeminiProvider(LLMProvider):
             self._session = aiohttp.ClientSession()
         return self._session
 
+    _RETRYABLE_STATUSES = {429, 503, 502, 500}
+    _MAX_RETRIES = 3
+    _BASE_BACKOFF = 1.0  # seconds
+
     async def query(self, prompt: str) -> str:
         session = await self._ensure_session()
         payload = {
@@ -172,12 +176,23 @@ class GeminiProvider(LLMProvider):
             },
         }
 
-        async with session.post(self._url, json=payload) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                raise RuntimeError(f"Gemini API HTTP {resp.status}: {error_text}")
+        last_error: Exception | None = None
+        for attempt in range(self._MAX_RETRIES):
+            async with session.post(self._url, json=payload) as resp:
+                if resp.status in self._RETRYABLE_STATUSES:
+                    error_text = await resp.text()
+                    last_error = RuntimeError(
+                        f"Gemini API HTTP {resp.status}: {error_text}"
+                    )
+                    delay = self._BASE_BACKOFF * (2 ** attempt)
+                    await asyncio.sleep(delay)
+                    continue
 
-            data = await resp.json()
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise RuntimeError(f"Gemini API HTTP {resp.status}: {error_text}")
+
+                data = await resp.json()
 
             if "promptFeedback" in data and "blockReason" in data["promptFeedback"]:
                 reason = data["promptFeedback"]["blockReason"]
@@ -191,6 +206,8 @@ class GeminiProvider(LLMProvider):
                     f"Gemini returned no text (finishReason={reason}). Raw: {data}"
                 )
             return parts[0]["text"]
+
+        raise last_error  # all retries exhausted
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
@@ -241,6 +258,11 @@ class NarrativeAgent(BaseAgent):
         self._active_games: dict[str, dict[str, Any]] = {}
         self._last_llm_ok: bool = True
         self._http_session: aiohttp.ClientSession | None = None
+        self._consecutive_failures: dict[str, int] = {}
+
+    # Number of consecutive LLM failures before vetoing. Keeps previous
+    # context (typically SAFE) alive during transient Gemini outages.
+    _LLM_GRACE_FAILURES = 3
 
     def _heartbeat_payload(self) -> dict:
         return {**super()._heartbeat_payload(), "api_ok": self._last_llm_ok}
@@ -275,8 +297,13 @@ class NarrativeAgent(BaseAgent):
 
     async def _on_game_state(self, _channel: str, data: dict) -> None:
         game_id = data.get("game_id", "")
-        if game_id:
-            self._active_games[game_id] = data
+        if not game_id:
+            return
+        is_new = game_id not in self._active_games
+        self._active_games[game_id] = data
+        if is_new:
+            self.log.info("New game detected {} – evaluating context immediately", game_id)
+            asyncio.create_task(self._evaluate_context(game_id, data))
 
     async def _context_loop(self) -> None:
         """Periodically query the LLM for each active game and update the cache."""
@@ -364,16 +391,29 @@ class NarrativeAgent(BaseAgent):
         try:
             response = await self._llm.query(prompt)
             response = response.strip()
-            self._last_llm_ok = True
+            self._consecutive_failures[game_id] = 0
         except Exception:
-            self._last_llm_ok = False
-            self.log.exception("LLM query failed for game {}", game_id)
-            await self.bus.set_context(
-                game_id,
-                ContextStatus.VETO,
-                "LLM query failed – fail-close",
-                ttl=self.settings.CONTEXT_TTL,
+            fails = self._consecutive_failures.get(game_id, 0) + 1
+            self._consecutive_failures[game_id] = fails
+            self.log.warning(
+                "LLM query failed for game {} (attempt {}/{})",
+                game_id, fails, self._LLM_GRACE_FAILURES,
             )
+            if fails >= self._LLM_GRACE_FAILURES:
+                self.log.error(
+                    "LLM grace period exhausted for game {} – vetoing", game_id
+                )
+                await self.bus.set_context(
+                    game_id,
+                    ContextStatus.VETO,
+                    "LLM query failed – fail-close",
+                    ttl=self.settings.CONTEXT_TTL,
+                )
+            else:
+                self.log.info(
+                    "LLM failed but within grace period for game {} – keeping previous context",
+                    game_id,
+                )
             return
 
         self.log.info("LLM response for game {}: '{}'", game_id, response[:120])
