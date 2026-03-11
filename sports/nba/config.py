@@ -15,12 +15,14 @@ STRATEGY_ARBITRAGE = "arbitrage"
 STRATEGY_TOTALS = "totals"
 STRATEGY_PLAYER_PROPS = "player_props"
 STRATEGY_FLASH_CRASH = "flash_crash"
+STRATEGY_MEAN_REVERSION = "mean_reversion"
 
 ALL_STRATEGIES = [
     STRATEGY_ARBITRAGE,
     STRATEGY_TOTALS,
     STRATEGY_PLAYER_PROPS,
     STRATEGY_FLASH_CRASH,
+    STRATEGY_MEAN_REVERSION,
 ]
 
 
@@ -28,6 +30,7 @@ def build_strategies(settings: AppSettings) -> list[BaseStrategy]:
     """Instantiate only the strategies enabled in settings."""
     from sports.nba.strategies.arbitrage import ArbitrageStrategy
     from sports.nba.strategies.flash_crash import FlashCrashStrategy
+    from sports.nba.strategies.mean_reversion import MeanReversionStrategy
     from sports.nba.strategies.player_props import PlayerPropStrategy
     from sports.nba.strategies.totals import TotalsStrategy
 
@@ -62,6 +65,12 @@ def build_strategies(settings: AppSettings) -> list[BaseStrategy]:
             exit_spread=settings.FLASH_CRASH_EXIT_SPREAD,
             min_price_cents=settings.FLASH_CRASH_MIN_PRICE,
             score_delta_limit=settings.FLASH_CRASH_SCORE_DELTA_LIMIT,
+        ),
+        STRATEGY_MEAN_REVERSION: MeanReversionStrategy(
+            min_divergence_cents=settings.MEAN_REVERSION_MIN_DIVERGENCE_CENTS,
+            exit_spread=settings.MEAN_REVERSION_EXIT_SPREAD,
+            min_minutes=settings.MEAN_REVERSION_MIN_MINUTES,
+            quarter_multipliers=q_mults,
         ),
     }
 

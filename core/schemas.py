@@ -305,5 +305,10 @@ class AppSettings(BaseSettings):
     # Time-based forced exit: sell all positions near end of game
     TIME_EXIT_MINUTES: float = 4.0  # Sell with < 4 min left in Q4
 
+    # Mean reversion: buy underpriced contracts, sell on recovery
+    MEAN_REVERSION_MIN_DIVERGENCE_CENTS: int = 8  # Min gap between fair value and ask
+    MEAN_REVERSION_EXIT_SPREAD: int = 5            # Base exit spread (may widen with divergence)
+    MEAN_REVERSION_MIN_MINUTES: float = 6.0        # Min game-minutes before firing
+
     # Per-sport strategy toggles (comma-separated strategy names)
-    NBA_ENABLED_STRATEGIES: str = "totals,player_props,arbitrage,flash_crash"
+    NBA_ENABLED_STRATEGIES: str = "totals,player_props,arbitrage,flash_crash,mean_reversion"
