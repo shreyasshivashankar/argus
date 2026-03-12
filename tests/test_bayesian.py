@@ -268,28 +268,28 @@ class TestOverProbability:
 
 
 # ===================================================================
-# TheRundown watcher
+# SharpAPI odds feed
 # ===================================================================
 
-class TestTheRundownWatcher:
+class TestSharpOddsFeed:
 
     def test_american_to_prob_favorite(self):
-        from watchers.therundown_feed import TheRundownWatcher
-        prob = TheRundownWatcher._american_to_prob(-110)
+        from watchers.sharp_odds_feed import SharpOddsFeed
+        prob = SharpOddsFeed._american_to_prob(-110)
         assert abs(prob - 0.524) < 0.01
 
     def test_american_to_prob_underdog(self):
-        from watchers.therundown_feed import TheRundownWatcher
-        prob = TheRundownWatcher._american_to_prob(150)
+        from watchers.sharp_odds_feed import SharpOddsFeed
+        prob = SharpOddsFeed._american_to_prob(150)
         assert abs(prob - 0.40) < 0.01
 
     def test_american_to_prob_even(self):
-        from watchers.therundown_feed import TheRundownWatcher
-        prob = TheRundownWatcher._american_to_prob(100)
+        from watchers.sharp_odds_feed import SharpOddsFeed
+        prob = SharpOddsFeed._american_to_prob(100)
         assert abs(prob - 0.50) < 0.01
 
     def test_disabled_without_key(self):
-        """Watcher should exit gracefully with no API key."""
+        """Feed should exit gracefully with no API key."""
         from unittest.mock import MagicMock
         from core.schemas import AppSettings
         settings = AppSettings(
@@ -299,11 +299,122 @@ class TestTheRundownWatcher:
             REDIS_URL="redis://localhost:6379",
             DATABASE_URL="postgresql://argus:argus@localhost:5432/argus",
             OPENAI_API_KEY="test",
-            THERUNDOWN_API_KEY="",
+            SHARPAPI_KEY="",
         )
-        from watchers.therundown_feed import TheRundownWatcher
-        watcher = TheRundownWatcher(settings, MagicMock())
-        assert watcher._api_key == ""
+        from watchers.sharp_odds_feed import SharpOddsFeed
+        feed = SharpOddsFeed(settings, MagicMock())
+        assert feed._api_key == ""
+
+    def test_process_total_odds_item(self):
+        """Verify total line parsing from SharpAPI response."""
+        from watchers.sharp_odds_feed import SharpOddsFeed
+        from unittest.mock import MagicMock
+        from core.schemas import AppSettings
+        settings = AppSettings(
+            KALSHI_API_KEY_ID="test",
+            KALSHI_PRIVATE_KEY_PATH="/dev/null",
+            KALSHI_ENV="demo",
+            REDIS_URL="redis://localhost:6379",
+            DATABASE_URL="postgresql://argus:argus@localhost:5432/argus",
+            OPENAI_API_KEY="test",
+        )
+        feed = SharpOddsFeed(settings, MagicMock())
+
+        item = {
+            "home_team": "PHI 76ers",
+            "away_team": "PHO Suns",
+            "selection": "Over 224.5",
+            "odds_american": -110,
+            "probability": 0.524,
+        }
+        from datetime import datetime, timezone
+        feed._process_odds_item(item, "total", datetime.now(timezone.utc))
+
+        assert "PHO SUNS @ PHI 76ERS" in feed._sharp_lines
+        line = feed._sharp_lines["PHO SUNS @ PHI 76ERS"]["TOTAL"]
+        assert line.line == 224.5
+        assert abs(line.sharp_prob - 0.524) < 0.01
+
+    def test_process_spread_odds_item(self):
+        from watchers.sharp_odds_feed import SharpOddsFeed
+        from unittest.mock import MagicMock
+        from core.schemas import AppSettings
+        settings = AppSettings(
+            KALSHI_API_KEY_ID="test",
+            KALSHI_PRIVATE_KEY_PATH="/dev/null",
+            KALSHI_ENV="demo",
+            REDIS_URL="redis://localhost:6379",
+            DATABASE_URL="postgresql://argus:argus@localhost:5432/argus",
+            OPENAI_API_KEY="test",
+        )
+        feed = SharpOddsFeed(settings, MagicMock())
+
+        item = {
+            "home_team": "LAL Lakers",
+            "away_team": "BOS Celtics",
+            "selection": "LAL Lakers -3.5",
+            "odds_american": -105,
+            "probability": 0.512,
+        }
+        from datetime import datetime, timezone
+        feed._process_odds_item(item, "spread", datetime.now(timezone.utc))
+
+        key = "BOS CELTICS @ LAL LAKERS"
+        assert key in feed._sharp_lines
+        assert feed._sharp_lines[key]["SPREAD"].line == 3.5
+
+    def test_get_total_line(self):
+        from watchers.sharp_odds_feed import SharpOddsFeed, SharpLine
+        from unittest.mock import MagicMock
+        from core.schemas import AppSettings
+        from datetime import datetime, timezone
+        settings = AppSettings(
+            KALSHI_API_KEY_ID="test",
+            KALSHI_PRIVATE_KEY_PATH="/dev/null",
+            KALSHI_ENV="demo",
+            REDIS_URL="redis://localhost:6379",
+            DATABASE_URL="postgresql://argus:argus@localhost:5432/argus",
+            OPENAI_API_KEY="test",
+        )
+        feed = SharpOddsFeed(settings, MagicMock())
+        now = datetime.now(timezone.utc)
+
+        # Manually populate cache
+        feed._sharp_lines["NYK KNICKS @ UTA JAZZ"] = {
+            "TOTAL": SharpLine("g1", "TOTAL", 224.5, 0.52, now),
+        }
+        feed._game_id_map["game-123"] = "NYK KNICKS @ UTA JAZZ"
+
+        assert feed.get_total_line("game-123") == 224.5
+        assert feed.get_total_line("nonexistent") is None
+
+    def test_map_game_by_team_names(self):
+        from watchers.sharp_odds_feed import SharpOddsFeed, SharpLine
+        from unittest.mock import MagicMock
+        from core.schemas import AppSettings
+        from datetime import datetime, timezone
+        settings = AppSettings(
+            KALSHI_API_KEY_ID="test",
+            KALSHI_PRIVATE_KEY_PATH="/dev/null",
+            KALSHI_ENV="demo",
+            REDIS_URL="redis://localhost:6379",
+            DATABASE_URL="postgresql://argus:argus@localhost:5432/argus",
+            OPENAI_API_KEY="test",
+        )
+        feed = SharpOddsFeed(settings, MagicMock())
+        now = datetime.now(timezone.utc)
+
+        feed._sharp_lines["PHO SUNS @ PHI 76ERS"] = {
+            "TOTAL": SharpLine("g1", "TOTAL", 220.0, 0.52, now),
+        }
+
+        # Map by team names
+        feed.map_game("game-456", "PHI 76ers", "PHO Suns")
+        assert feed.get_total_line("game-456") == 220.0
+
+        # Different game, no match
+        feed.map_game("game-789", "LAL Lakers", "BOS Celtics")
+        assert feed.get_total_line("game-789") is None
 
 
 # ===================================================================

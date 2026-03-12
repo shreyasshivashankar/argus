@@ -26,7 +26,7 @@ from sports.nba.feed import BallDontLieFeed
 from sports.nba.quant import NBAQuantAgent
 from sports.nba.season_averages import SeasonAverageCache
 from watchers.kalshi_feed import KalshiFeedWatcher
-from watchers.therundown_feed import TheRundownWatcher
+from watchers.sharp_odds_feed import SharpOddsFeed
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,17 +78,17 @@ async def main(
 
     # --- Bayesian data sources ---
     season_cache = SeasonAverageCache(settings)
-    therundown = TheRundownWatcher(settings, bus)
-    if settings.THERUNDOWN_API_KEY:
-        logger.info("TheRundown sharp book watcher enabled")
+    sharp_odds = SharpOddsFeed(settings, bus)
+    if settings.SHARPAPI_KEY:
+        logger.info("SharpAPI Pinnacle odds feed enabled (poll {}s)", settings.SHARP_ODDS_POLL_INTERVAL)
     else:
-        logger.info("TheRundown disabled (no API key) — using default priors")
+        logger.info("SharpAPI disabled (no API key) — using default Bayesian priors")
 
     # --- Agents ---
     nba_quant = NBAQuantAgent(
         settings, bus, client,
         season_avg_cache=season_cache,
-        sharp_book_watcher=therundown,
+        sharp_book_watcher=sharp_odds,
     )
     narrative = NarrativeAgent(settings, bus, client)
 
@@ -120,7 +120,7 @@ async def main(
     tasks = [
         asyncio.create_task(sports_feed.run(), name="sports_feed"),
         asyncio.create_task(kalshi_feed.run(), name="kalshi_feed"),
-        asyncio.create_task(therundown.run(), name="therundown"),
+        asyncio.create_task(sharp_odds.run(), name="sharp_odds"),
         asyncio.create_task(nba_quant.start(), name="nba_quant"),
         asyncio.create_task(narrative.start(), name="narrative"),
         asyncio.create_task(executor.start(), name="executor"),
@@ -149,7 +149,7 @@ async def main(
 
     sports_feed.stop()
     kalshi_feed.stop()
-    therundown.stop()
+    sharp_odds.stop()
     nba_quant.stop()
     narrative.stop()
     executor.stop()

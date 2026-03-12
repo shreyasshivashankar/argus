@@ -134,7 +134,7 @@ class MeanReversionStrategy(BaseStrategy):
 
         # Optional Bayesian data sources (injected by config.py)
         self._season_cache = season_avg_cache  # SeasonAverageCache
-        self._sharp_books = sharp_book_watcher  # TheRundownWatcher
+        self._sharp_books = sharp_book_watcher  # SharpOddsFeed
 
         # Rolling price history per ticker: (monotonic_ts, yes_bid)
         self._price_history: dict[str, deque[tuple[float, int]]] = defaultdict(

@@ -56,6 +56,8 @@ class NBAQuantAgent(BaseAgent):
     ) -> None:
         super().__init__("nba_quant", settings, bus, client)
 
+        self._sharp_book_watcher = sharp_book_watcher
+
         self._strategies: list[BaseStrategy] = strategies or build_strategies(
             settings,
             season_avg_cache=season_avg_cache,
@@ -133,6 +135,11 @@ class NBAQuantAgent(BaseAgent):
         try:
             gs = GameState(**data)
             self._games[gs.game_id] = gs
+            # Map game to SharpAPI event key for Pinnacle odds lookup
+            if self._sharp_book_watcher and hasattr(self._sharp_book_watcher, "map_game"):
+                self._sharp_book_watcher.map_game(
+                    gs.game_id, gs.home_team, gs.away_team,
+                )
         except Exception:
             self.log.warning("Bad game:state payload: {}", data)
 
