@@ -84,6 +84,12 @@ class NBAQuantAgent(BaseAgent):
         # fill/portfolio update arrives (race condition with MAX_GAME_EXPOSURE).
         self._pending_game_orders: set[str] = set()
 
+        # Per-game + per-market-type dedup: tracks which market types
+        # (TOTAL, PTS, SPREAD, etc.) already have a pending or open position
+        # for each game.  Prevents correlated bets on different lines of the
+        # same market type (e.g. Over 226 AND Over 244 on the same game).
+        self._pending_market_types: dict[str, set[str]] = {}
+
         # Trailing stop: track peak bid per position (keyed by client_order_id)
         self._peak_bids: dict[str, int] = {}
 
@@ -148,6 +154,24 @@ class NBAQuantAgent(BaseAgent):
                     if set(self._game_to_tickers.get(gid, [])) & confirmed_tickers
                 }
                 self._pending_game_orders -= cleared
+
+            # Evict pending market-type entries for games with no open positions
+            # (all positions closed/settled), but keep entries for games that
+            # still have live positions — those market types are still "taken".
+            if self._pending_market_types:
+                live_tickers = set()
+                if self._portfolio.positions:
+                    live_tickers = {
+                        pos.ticker for pos in self._portfolio.positions
+                        if pos.remaining_count > 0
+                    }
+                stale_games = []
+                for gid in list(self._pending_market_types):
+                    game_tickers = set(self._game_to_tickers.get(gid, []))
+                    if not (game_tickers & live_tickers):
+                        stale_games.append(gid)
+                for gid in stale_games:
+                    del self._pending_market_types[gid]
         except Exception:
             self.log.warning("Bad portfolio:state payload: {}", data)
 
@@ -223,12 +247,23 @@ class NBAQuantAgent(BaseAgent):
                 return False
             if self._get_game_exposure(game.game_id) >= self.settings.MAX_GAME_EXPOSURE:
                 return False
+            # --- Per-market-type dedup ---
+            # Prevent correlated bets: only one position per market type per game
+            # (e.g. can't hold Over-226 AND Over-244 on the same game).
+            if self._is_market_type_taken(game.game_id, signal.ticker):
+                return False
 
         entry_price_cents = signal.entry_price
 
         if self._can_fund_trade(entry_price_cents):
             self._signal_cooldowns[signal.ticker] = now
             self._pending_game_orders.add(game.game_id)
+            # Record market type to prevent correlated bets on different lines
+            if game.game_id not in self._pending_market_types:
+                self._pending_market_types[game.game_id] = set()
+            self._pending_market_types[game.game_id].add(
+                self._market_type_key(signal.ticker)
+            )
             await self.bus.publish("signal:validated", signal)
             self.log.info(
                 "+EV signal [{}]: {} EV={:.4f} entry={} exit={} conf={:.3f}",
@@ -367,6 +402,48 @@ class NBAQuantAgent(BaseAgent):
             1 for pos in self._portfolio.positions
             if pos.ticker in valid_tickers and pos.remaining_count > 0
         )
+
+    @staticmethod
+    def _market_type_key(ticker: str) -> str:
+        """Classify a ticker into a market-type key for dedup.
+
+        Groups correlated bets:  different lines on the same market type
+        for the same game (e.g. Over-223, Over-226, Over-244) all return
+        the same key so only one can be held at a time.
+
+        For player props the key includes the player name segment so
+        positions on different players are independent.
+        """
+        upper = ticker.upper()
+        prefix = upper.split("-", 1)[0]  # "KXNBATOTAL", "KXNBAPTS", etc.
+        mtype = prefix.replace("KXNBA", "", 1) if prefix.startswith("KXNBA") else prefix
+
+        # Player props: include player segment for independence across players
+        # Ticker format: KXNBAPTS-26MAR11NYKUTA-NYKKTOWNS32-15
+        if mtype in ("PTS", "PLAYERPTS", "REB", "AST", "STL", "BLK", "3PT"):
+            parts = ticker.split("-")
+            player_seg = parts[2] if len(parts) >= 3 else ""
+            return f"{mtype}:{player_seg}"
+
+        return mtype  # "TOTAL", "TEAMTOTAL", "SPREAD", "1HWINNER", "1HTOTAL", etc.
+
+    def _is_market_type_taken(self, game_id: str, ticker: str) -> bool:
+        """True if we already hold or have pending a position on this market type."""
+        mtype = self._market_type_key(ticker)
+
+        # Check pending orders from this session
+        if mtype in self._pending_market_types.get(game_id, set()):
+            return True
+
+        # Check live portfolio positions
+        if self._portfolio and self._portfolio.positions:
+            valid_tickers = self._game_to_tickers.get(game_id, [])
+            for pos in self._portfolio.positions:
+                if pos.ticker in valid_tickers and pos.remaining_count > 0:
+                    if self._market_type_key(pos.ticker) == mtype:
+                        return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Market mapping
