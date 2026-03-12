@@ -35,6 +35,24 @@ from core.schemas import (
 )
 from core.utils import MINUTES_PER_GAME, team_minutes_played
 
+# Bayesian model (optional — falls back to linear if not available)
+try:
+    from sports.nba.bayesian import (
+        over_probability as bayesian_over_prob,
+        project_game_total,
+        project_player_stat,
+        project_spread,
+        project_team_total,
+        GAME_TOTAL_STD_DEV,
+        TEAM_TOTAL_STD_DEV,
+        PLAYER_POINTS_STD_DEV as _B_PTS_STD,
+        PLAYER_GENERIC_STD_DEV as _B_GEN_STD,
+        SPREAD_STD_DEV,
+    )
+    _HAS_BAYESIAN = True
+except ImportError:
+    _HAS_BAYESIAN = False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -106,11 +124,17 @@ class MeanReversionStrategy(BaseStrategy):
         exit_spread: int = 5,
         min_minutes: float = 6.0,
         quarter_multipliers: tuple[float, float, float, float] = (2.5, 1.75, 1.25, 0.75),
+        season_avg_cache: object | None = None,
+        sharp_book_watcher: object | None = None,
     ) -> None:
         self._min_divergence = min_divergence_cents
         self._exit_spread = exit_spread
         self._min_minutes = min_minutes
         self._quarter_multipliers = quarter_multipliers
+
+        # Optional Bayesian data sources (injected by config.py)
+        self._season_cache = season_avg_cache  # SeasonAverageCache
+        self._sharp_books = sharp_book_watcher  # TheRundownWatcher
 
         # Rolling price history per ticker: (monotonic_ts, yes_bid)
         self._price_history: dict[str, deque[tuple[float, int]]] = defaultdict(
@@ -247,9 +271,22 @@ class MeanReversionStrategy(BaseStrategy):
         current_total = game.home_score + game.away_score
         if minutes_played <= 0:
             return None
+
+        # Bayesian path: use sharp book line as prior
+        if _HAS_BAYESIAN:
+            sharp_line = None
+            if self._sharp_books is not None:
+                sharp_line = self._sharp_books.get_total_line(game.game_id)
+            projected = project_game_total(game, sharp_line=sharp_line)
+            if projected is not None:
+                prob = bayesian_over_prob(projected, line, GAME_TOTAL_STD_DEV, minutes_played)
+                if not is_over:
+                    prob = 1.0 - prob
+                return int(prob * 100)
+
+        # Fallback: linear pace
         pace = current_total / minutes_played
         projected = pace * MINUTES_PER_GAME
-
         prob = self._normal_cdf_prob(projected, line, _GAME_TOTAL_STD_DEV, minutes_played)
         if not is_over:
             prob = 1.0 - prob
@@ -274,9 +311,17 @@ class MeanReversionStrategy(BaseStrategy):
 
         if minutes_played <= 0:
             return None
+
+        if _HAS_BAYESIAN:
+            projected = project_team_total(score, game)
+            if projected is not None:
+                prob = bayesian_over_prob(projected, line, TEAM_TOTAL_STD_DEV, minutes_played)
+                if not is_over:
+                    prob = 1.0 - prob
+                return int(prob * 100)
+
         pace = score / minutes_played
         projected = pace * MINUTES_PER_GAME
-
         prob = self._normal_cdf_prob(projected, line, _TEAM_TOTAL_STD_DEV, minutes_played)
         if not is_over:
             prob = 1.0 - prob
@@ -302,11 +347,17 @@ class MeanReversionStrategy(BaseStrategy):
         if minutes_played <= 0:
             return None
 
-        # Project margin: assume current margin rate continues
+        if _HAS_BAYESIAN:
+            sharp_line = None
+            if self._sharp_books is not None:
+                sharp_line = self._sharp_books.get_spread_line(game.game_id)
+            projected = project_spread(current_margin, game, sharp_line=sharp_line)
+            if projected is not None:
+                prob = bayesian_over_prob(projected, line, SPREAD_STD_DEV, minutes_played)
+                return int(prob * 100)
+
         margin_per_min = current_margin / minutes_played
         projected_margin = margin_per_min * MINUTES_PER_GAME
-
-        # "Team covers -LINE" → P(projected_margin > line)
         prob = self._normal_cdf_prob(projected_margin, line, _SPREAD_STD_DEV, minutes_played)
         return int(prob * 100)
 
@@ -329,6 +380,24 @@ class MeanReversionStrategy(BaseStrategy):
         if current_stat is None:
             return None
 
+        # Try Bayesian projection with season average prior
+        if _HAS_BAYESIAN:
+            player_prior = None
+            if self._season_cache is not None:
+                player_prior = self._season_cache.get(player.player_id)
+            projected = project_player_stat(player, game, stat_attr, player_prior)
+            if projected is not None:
+                std_dev = _B_PTS_STD if stat_attr == "pts" else _B_GEN_STD
+                prob = bayesian_over_prob(projected, line, std_dev, minutes_played)
+                if not is_over:
+                    prob = 1.0 - prob
+                # High-line dampening still applies
+                high_thresh = _HIGH_LINE_THRESHOLD.get(stat_attr)
+                if high_thresh is not None and line > high_thresh:
+                    prob *= high_thresh / line
+                return int(prob * 100)
+
+        # Fallback: linear projection
         projected = self._project_stat(player, game, stat_attr)
         if projected is None:
             return None
@@ -338,12 +407,10 @@ class MeanReversionStrategy(BaseStrategy):
         if not is_over:
             prob = 1.0 - prob
 
-        # Dampen confidence for high lines — the model overstates certainty
-        # on volatile outcomes like "25+ pts" where a hot streak can regress.
+        # Dampen confidence for high lines
         high_thresh = _HIGH_LINE_THRESHOLD.get(stat_attr)
         if high_thresh is not None and line > high_thresh:
-            dampening = high_thresh / line  # e.g. 20/25 = 0.80
-            prob *= dampening
+            prob *= high_thresh / line
 
         return int(prob * 100)
 

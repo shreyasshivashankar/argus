@@ -24,7 +24,9 @@ from core.client import KalshiAsyncClient
 from core.schemas import AppSettings
 from sports.nba.feed import BallDontLieFeed
 from sports.nba.quant import NBAQuantAgent
+from sports.nba.season_averages import SeasonAverageCache
 from watchers.kalshi_feed import KalshiFeedWatcher
+from watchers.therundown_feed import TheRundownWatcher
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,8 +76,20 @@ async def main(
     logger.info("Using BallDontLieFeed (GOAT, ~500 req/min)")
     kalshi_feed = KalshiFeedWatcher(client, bus)
 
+    # --- Bayesian data sources ---
+    season_cache = SeasonAverageCache(settings)
+    therundown = TheRundownWatcher(settings, bus)
+    if settings.THERUNDOWN_API_KEY:
+        logger.info("TheRundown sharp book watcher enabled")
+    else:
+        logger.info("TheRundown disabled (no API key) — using default priors")
+
     # --- Agents ---
-    nba_quant = NBAQuantAgent(settings, bus, client)
+    nba_quant = NBAQuantAgent(
+        settings, bus, client,
+        season_avg_cache=season_cache,
+        sharp_book_watcher=therundown,
+    )
     narrative = NarrativeAgent(settings, bus, client)
 
     if paper_mode:
@@ -106,6 +120,7 @@ async def main(
     tasks = [
         asyncio.create_task(sports_feed.run(), name="sports_feed"),
         asyncio.create_task(kalshi_feed.run(), name="kalshi_feed"),
+        asyncio.create_task(therundown.run(), name="therundown"),
         asyncio.create_task(nba_quant.start(), name="nba_quant"),
         asyncio.create_task(narrative.start(), name="narrative"),
         asyncio.create_task(executor.start(), name="executor"),
@@ -134,12 +149,14 @@ async def main(
 
     sports_feed.stop()
     kalshi_feed.stop()
+    therundown.stop()
     nba_quant.stop()
     narrative.stop()
     executor.stop()
     if tracker:
         tracker.stop()
 
+    await season_cache.close()
     await client.close()
     await bus.close()
 

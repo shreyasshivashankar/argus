@@ -51,10 +51,16 @@ class NBAQuantAgent(BaseAgent):
         bus: SignalBus,
         client: KalshiAsyncClient,
         strategies: list[BaseStrategy] | None = None,
+        season_avg_cache: object | None = None,
+        sharp_book_watcher: object | None = None,
     ) -> None:
         super().__init__("nba_quant", settings, bus, client)
 
-        self._strategies: list[BaseStrategy] = strategies or build_strategies(settings)
+        self._strategies: list[BaseStrategy] = strategies or build_strategies(
+            settings,
+            season_avg_cache=season_avg_cache,
+            sharp_book_watcher=sharp_book_watcher,
+        )
 
         self._games: dict[str, GameState] = {}
         self._markets: dict[str, MarketState] = {}

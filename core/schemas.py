@@ -310,5 +310,9 @@ class AppSettings(BaseSettings):
     MEAN_REVERSION_EXIT_SPREAD: int = 5            # Base exit spread (may widen with divergence)
     MEAN_REVERSION_MIN_MINUTES: float = 6.0        # Min game-minutes before firing
 
+    # TheRundown sharp book odds
+    THERUNDOWN_API_KEY: str = ""
+    THERUNDOWN_POLL_INTERVAL: float = 15.0  # seconds between polls
+
     # Per-sport strategy toggles (comma-separated strategy names)
     NBA_ENABLED_STRATEGIES: str = "totals,player_props,arbitrage,flash_crash,mean_reversion"

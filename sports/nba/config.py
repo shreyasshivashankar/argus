@@ -26,7 +26,11 @@ ALL_STRATEGIES = [
 ]
 
 
-def build_strategies(settings: AppSettings) -> list[BaseStrategy]:
+def build_strategies(
+    settings: AppSettings,
+    season_avg_cache: object | None = None,
+    sharp_book_watcher: object | None = None,
+) -> list[BaseStrategy]:
     """Instantiate only the strategies enabled in settings."""
     from sports.nba.strategies.arbitrage import ArbitrageStrategy
     from sports.nba.strategies.flash_crash import FlashCrashStrategy
@@ -71,6 +75,8 @@ def build_strategies(settings: AppSettings) -> list[BaseStrategy]:
             exit_spread=settings.MEAN_REVERSION_EXIT_SPREAD,
             min_minutes=settings.MEAN_REVERSION_MIN_MINUTES,
             quarter_multipliers=q_mults,
+            season_avg_cache=season_avg_cache,
+            sharp_book_watcher=sharp_book_watcher,
         ),
     }
 
