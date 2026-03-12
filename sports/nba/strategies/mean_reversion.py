@@ -50,6 +50,23 @@ _USAGE_BOOST_MAX = 1.5
 _MIN_PLAYER_MINUTES = 5.0
 _MIN_TEAM_FGA = 10
 
+# High-line dampening: lines above this threshold get confidence reduced.
+# Scoring 25+ pts is much more volatile than 10+; the model's pace
+# projection can't reliably distinguish a hot streak from sustainable pace.
+_HIGH_LINE_THRESHOLD: dict[str, float] = {
+    "pts": 20.0,
+    "reb": 10.0,
+    "ast": 8.0,
+    "fg3m": 3.0,
+    "stl": 2.0,
+    "blk": 2.0,
+}
+
+# Player props require this multiple of min_divergence_cents to fire.
+# Totals aggregate across all players (variance cancels out), but
+# individual player stats are far noisier.
+_PROP_DIVERGENCE_MULTIPLIER = 1.5
+
 # Game totals
 _GAME_TOTAL_STD_DEV = 15.0
 _TEAM_TOTAL_STD_DEV = 9.0
@@ -134,8 +151,16 @@ class MeanReversionStrategy(BaseStrategy):
         entry_price = market.yes_ask
 
         # Divergence: how far below fair value is the market?
+        # Player props require a larger divergence than team-level markets
+        # because individual stats are far more volatile.
+        upper = market.ticker.upper()
+        is_player_prop = self._detect_stat_type(upper) is not None
+        min_div = self._min_divergence
+        if is_player_prop:
+            min_div = int(min_div * _PROP_DIVERGENCE_MULTIPLIER)
+
         divergence = fair_value - entry_price
-        if divergence < self._min_divergence:
+        if divergence < min_div:
             return None
 
         # Confirm the drop is recent (price was higher in our window)
@@ -312,6 +337,14 @@ class MeanReversionStrategy(BaseStrategy):
         prob = self._normal_cdf_prob(projected, line, std_dev, minutes_played)
         if not is_over:
             prob = 1.0 - prob
+
+        # Dampen confidence for high lines — the model overstates certainty
+        # on volatile outcomes like "25+ pts" where a hot streak can regress.
+        high_thresh = _HIGH_LINE_THRESHOLD.get(stat_attr)
+        if high_thresh is not None and line > high_thresh:
+            dampening = high_thresh / line  # e.g. 20/25 = 0.80
+            prob *= dampening
+
         return int(prob * 100)
 
     def _project_stat(

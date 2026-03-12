@@ -854,3 +854,181 @@ class TestConfigRegistration:
         names = {s.name for s in strats}
         assert "mean_reversion" in names
         assert len(strats) == 5
+
+
+# ===================================================================
+# HIGH-LINE DAMPENING
+# ===================================================================
+
+class TestHighLineDampening:
+    """Verify that high player-prop lines get confidence reduced."""
+
+    def test_low_line_not_dampened(self):
+        """Line 10 pts (below threshold 20) — no dampening."""
+        s = _strategy(min_divergence_cents=5)
+        pj = _pj_washington(pts=8, minutes=12.0, fga=8)
+        game = _game(quarter=3, clock="6:00", player_stats=[pj, _teammate()])
+        market = _market(
+            ticker="KXNBAPTS-26MAR10DALATL-DALPWASHINGTON25-10",
+            yes_bid=40, yes_ask=42,
+        )
+        prob = s.model_probability(game, market)
+        assert prob is not None
+        # For line=10 with 8 pts in 12 min, projection is high → should be > 0.5
+        assert prob > 0.5
+
+    def test_high_line_dampened(self):
+        """Line 25 pts → dampened by 20/25 = 0.80."""
+        s = _strategy(min_divergence_cents=5)
+        # Hot player: 12 pts in 10 min → projects ~30+ pts
+        pj = _pj_washington(pts=12, minutes=10.0, fga=10)
+        game = _game(quarter=2, clock="6:00", player_stats=[pj, _teammate()])
+
+        market_low = _market(
+            ticker="KXNBAPTS-26MAR10DALATL-DALPWASHINGTON25-10",
+            yes_bid=80, yes_ask=82,
+        )
+        market_high = _market(
+            ticker="KXNBAPTS-26MAR10DALATL-DALPWASHINGTON25-25",
+            yes_bid=60, yes_ask=62,
+        )
+
+        prob_low = s.model_probability(game, market_low)
+        prob_high = s.model_probability(game, market_high)
+        assert prob_low is not None
+        assert prob_high is not None
+        # High line should be dampened relative to what the raw model would say
+        # 25-pt line dampened by 20/25 = 0.80, so significantly lower
+        assert prob_high < prob_low
+
+    def test_very_high_line_heavily_dampened(self):
+        """Line 30 pts → dampened by 20/30 = 0.67."""
+        s = _strategy(min_divergence_cents=5)
+        pj = _pj_washington(pts=15, minutes=12.0, fga=12)
+        game = _game(quarter=2, clock="6:00", player_stats=[pj, _teammate()])
+
+        market_25 = _market(
+            ticker="KXNBAPTS-26MAR10DALATL-DALPWASHINGTON25-25",
+            yes_bid=60, yes_ask=62,
+        )
+        market_30 = _market(
+            ticker="KXNBAPTS-26MAR10DALATL-DALPWASHINGTON25-30",
+            yes_bid=40, yes_ask=42,
+        )
+
+        prob_25 = s.model_probability(game, market_25)
+        prob_30 = s.model_probability(game, market_30)
+        assert prob_25 is not None
+        assert prob_30 is not None
+        # 30-pt line should be more dampened than 25-pt line
+        assert prob_30 < prob_25
+
+    def test_rebound_line_dampened_above_10(self):
+        """Rebounds > 10 should be dampened."""
+        s = _strategy(min_divergence_cents=5)
+        pj = _pj_washington(reb=8, minutes=15.0)
+        game = _game(quarter=3, clock="6:00", player_stats=[pj, _teammate()])
+
+        market_8 = _market(
+            ticker="KXNBAREB-26MAR10DALATL-DALPWASHINGTON25-8",
+            yes_bid=70, yes_ask=72,
+        )
+        market_15 = _market(
+            ticker="KXNBAREB-26MAR10DALATL-DALPWASHINGTON25-15",
+            yes_bid=40, yes_ask=42,
+        )
+
+        prob_8 = s.model_probability(game, market_8)
+        prob_15 = s.model_probability(game, market_15)
+        assert prob_8 is not None
+        assert prob_15 is not None
+        assert prob_15 < prob_8
+
+    def test_keyonte_george_scenario(self):
+        """Reproduce the exact bug: 25+ pts with 94% confidence should be dampened.
+
+        George had ~10 pts in 12 min, model projected ~25+ pts with 94% conf.
+        With dampening (20/25 = 0.80), max confidence should be ~75%.
+        """
+        s = _strategy(min_divergence_cents=5)
+        george = PlayerBoxScore(
+            player_id="kg3",
+            first_name="Keyonte",
+            last_name="George",
+            team_abbr="UTA",
+            minutes=12.0,
+            pts=10,
+            fgm=4, fga=8, fg3m=2, fg3a=4, ftm=0, fta=0,
+            reb=2, ast=3, stl=1, blk=0, turnover=1, pf=1, plus_minus=5,
+        )
+        teammate = PlayerBoxScore(
+            player_id="tm02",
+            first_name="John",
+            last_name="Collins",
+            team_abbr="UTA",
+            minutes=12.0,
+            pts=8, fgm=3, fga=10, fg3m=1, fg3a=3, ftm=1, fta=2,
+            reb=4, ast=1, stl=0, blk=1, turnover=0, pf=2, plus_minus=-2,
+        )
+        game = _game(
+            quarter=2, clock="6:00",
+            home_abbr="NYK", away_abbr="UTA",
+            player_stats=[george, teammate],
+        )
+        market = _market(
+            ticker="KXNBAPTS-26MAR11NYKUTA-UTAKGEORGE3-25",
+            yes_bid=30, yes_ask=33,
+        )
+
+        prob = s.model_probability(game, market)
+        assert prob is not None
+        # With dampening, should be well below 90%
+        assert prob < 0.85, f"Confidence {prob:.2f} is too high for 25+ pts line"
+
+
+# ===================================================================
+# PLAYER PROP DIVERGENCE MULTIPLIER
+# ===================================================================
+
+class TestPropDivergenceMultiplier:
+    """Player props require 1.5x the min divergence of team-level markets."""
+
+    def test_total_fires_at_base_divergence(self):
+        """Game total with 8c divergence should fire (min_divergence=8)."""
+        s = _strategy(min_divergence_cents=8)
+        game = _game(home_score=68, away_score=62, quarter=3, clock="6:00")
+        market = _market(
+            ticker="KXNBATOTAL-26MAR10DALATL-190",
+            yes_bid=55, yes_ask=58,
+        )
+        _seed_price_history(s, market.ticker, [78, 75, 70, 65, 58])
+        signal = s.evaluate(game, market)
+        assert signal is not None
+
+    def test_player_prop_blocked_at_base_divergence(self):
+        """Player prop with only 8c divergence should NOT fire (needs 12c = 8*1.5)."""
+        s = _strategy(min_divergence_cents=8)
+        # PJ has 4 pts in 12 min → projects ~16 pts, line 10 → fair ~70c
+        # Ask at 63c → divergence ~7c, which is < 12c (8 * 1.5)
+        pj = _pj_washington(pts=4, minutes=12.0, fga=6)
+        game = _game(quarter=2, clock="6:00", player_stats=[pj, _teammate()])
+        market = _market(
+            ticker="KXNBAPTS-26MAR10DALATL-DALPWASHINGTON25-10",
+            yes_bid=61, yes_ask=63,
+        )
+        _seed_price_history(s, market.ticker, [75, 72, 68, 65, 63])
+        signal = s.evaluate(game, market)
+        assert signal is None
+
+    def test_player_prop_fires_at_higher_divergence(self):
+        """Player prop with large divergence (>12c) should fire."""
+        s = _strategy(min_divergence_cents=8)
+        pj = _pj_washington(pts=4, minutes=12.0, fga=6)
+        game = _game(quarter=2, clock="6:00", player_stats=[pj, _teammate()])
+        market = _market(
+            ticker="KXNBAPTS-26MAR10DALATL-DALPWASHINGTON25-10",
+            yes_bid=43, yes_ask=45,
+        )
+        _seed_price_history(s, market.ticker, [65, 63, 60, 55, 45])
+        signal = s.evaluate(game, market)
+        assert signal is not None
