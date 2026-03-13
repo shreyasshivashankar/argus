@@ -65,6 +65,9 @@ async def main(
     logger.remove()
     logger.add(sys.stderr, level="INFO")
     logger.add("logs/nba.log", rotation="50 MB", retention="2 days", level="DEBUG", enqueue=True)
+    logger.add("logs/nba_quant.log", rotation="50 MB", retention="2 days", level="DEBUG", enqueue=True, filter=lambda r: "quant" in r["name"] or "strateg" in r["name"])
+    logger.add("logs/executor.log", rotation="50 MB", retention="2 days", level="DEBUG", enqueue=True, filter=lambda r: "executor" in r["name"])
+    logger.add("logs/narrative.log", rotation="50 MB", retention="2 days", level="DEBUG", enqueue=True, filter=lambda r: "narrative" in r["name"])
     logger.info("NBA bot starting — env={}, mode={}", settings.KALSHI_ENV, mode_label)
 
     # --- Core infrastructure ---
@@ -89,6 +92,7 @@ async def main(
         settings, bus, client,
         season_avg_cache=season_cache,
         sharp_book_watcher=sharp_odds,
+        kalshi_feed=kalshi_feed,
     )
     narrative = NarrativeAgent(settings, bus, client)
 

@@ -244,6 +244,7 @@ def make_market_state(
     yes_ask: int = 16,
     no_bid: int = 0,
     no_ask: int = 0,
+    volume: int = 100,
 ) -> MarketState:
     return MarketState(
         ticker=ticker,
@@ -251,7 +252,7 @@ def make_market_state(
         yes_ask=yes_ask,
         no_bid=no_bid,
         no_ask=no_ask,
-        volume=100,
+        volume=volume,
         timestamp=datetime.utcnow(),
     )
 

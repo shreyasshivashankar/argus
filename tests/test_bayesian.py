@@ -323,12 +323,14 @@ class TestSharpOddsFeed:
         item = {
             "home_team": "PHI 76ers",
             "away_team": "PHO Suns",
-            "selection": "Over 224.5",
+            "selection": "Over",
+            "selection_type": "over",
+            "line": 224.5,
             "odds_american": -110,
             "probability": 0.524,
         }
         from datetime import datetime, timezone
-        feed._process_odds_item(item, "total", datetime.now(timezone.utc))
+        feed._process_odds_item(item, "total_points", datetime.now(timezone.utc))
 
         assert "PHO SUNS @ PHI 76ERS" in feed._sharp_lines
         line = feed._sharp_lines["PHO SUNS @ PHI 76ERS"]["TOTAL"]
@@ -352,12 +354,14 @@ class TestSharpOddsFeed:
         item = {
             "home_team": "LAL Lakers",
             "away_team": "BOS Celtics",
-            "selection": "LAL Lakers -3.5",
+            "selection": "LAL Lakers",
+            "selection_type": "home",
+            "line": -3.5,
             "odds_american": -105,
             "probability": 0.512,
         }
         from datetime import datetime, timezone
-        feed._process_odds_item(item, "spread", datetime.now(timezone.utc))
+        feed._process_odds_item(item, "point_spread", datetime.now(timezone.utc))
 
         key = "BOS CELTICS @ LAL LAKERS"
         assert key in feed._sharp_lines

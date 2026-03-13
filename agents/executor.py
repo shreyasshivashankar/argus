@@ -366,6 +366,17 @@ class OrderExecutor(BaseAgent):
 
         entry_price = signal.entry_price + self.settings.SLIPPAGE_TICKS
 
+        # Arb needs capital for both YES + NO legs; verify total cost fits
+        if signal.source == "arbitrage" and signal.no_entry_price:
+            no_price = signal.no_entry_price + self.settings.SLIPPAGE_TICKS
+            total_cost = count * (entry_price + no_price) / 100.0
+            if total_cost > self.current_bankroll * 0.30:
+                self.log.info(
+                    "Arb capital cap: {} would use ${:.2f} (>{:.0f}% of ${:.2f})",
+                    signal.ticker, total_cost, 30, self.current_bankroll,
+                )
+                return
+
         order = Order(
             ticker=signal.ticker,
             action=Action.BUY,
@@ -884,8 +895,14 @@ class OrderExecutor(BaseAgent):
                     await self.client.cancel_order(managed.kalshi_order_id)
                     managed.state = OrderState.CANCELED
                     self.log.warning("Canceled resting entry: {}", managed.kalshi_order_id)
-                except Exception:
-                    self.log.exception("Failed to cancel {}", managed.kalshi_order_id)
+                except Exception as exc:
+                    # 404 = order already filled/settled/canceled by Kalshi
+                    from core.client import KalshiAPIError
+                    if isinstance(exc, KalshiAPIError) and exc.status == 404:
+                        managed.state = OrderState.CANCELED
+                        self.log.info("Order already gone on Kalshi (404): {}", managed.kalshi_order_id)
+                    else:
+                        self.log.exception("Failed to cancel {}", managed.kalshi_order_id)
         return exits_left
 
     async def _send_telegram_alert(self) -> None:

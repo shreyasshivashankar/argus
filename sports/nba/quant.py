@@ -53,10 +53,12 @@ class NBAQuantAgent(BaseAgent):
         strategies: list[BaseStrategy] | None = None,
         season_avg_cache: object | None = None,
         sharp_book_watcher: object | None = None,
+        kalshi_feed: object | None = None,
     ) -> None:
         super().__init__("nba_quant", settings, bus, client)
 
         self._sharp_book_watcher = sharp_book_watcher
+        self._kalshi_feed = kalshi_feed
 
         self._strategies: list[BaseStrategy] = strategies or build_strategies(
             settings,
@@ -252,19 +254,12 @@ class NBAQuantAgent(BaseAgent):
             return False
 
         # --- Per-game exposure cap ---
-        # Arbitrage bypasses both checks: it's risk-free and needs both YES + NO
-        # to fire on the same game. All other strategies enforce the pending lock
-        # (race-condition guard) and the portfolio exposure cap.
-        if signal.source != "arbitrage":
-            if game.game_id in self._pending_game_orders:
-                return False
-            if self._get_game_exposure(game.game_id) >= self.settings.MAX_GAME_EXPOSURE:
-                return False
-            # --- Per-market-type dedup ---
-            # Prevent correlated bets: only one position per market type per game
-            # (e.g. can't hold Over-226 AND Over-244 on the same game).
-            if self._is_market_type_taken(game.game_id, signal.ticker):
-                return False
+        if game.game_id in self._pending_game_orders:
+            return False
+        if self._get_game_exposure(game.game_id) >= self.settings.MAX_GAME_EXPOSURE:
+            return False
+        if self._is_market_type_taken(game.game_id, signal.ticker):
+            return False
 
         entry_price_cents = signal.entry_price
 
@@ -504,6 +499,9 @@ class NBAQuantAgent(BaseAgent):
                 self._logged_unmapped.discard(game_id)
                 for t in matched:
                     self.log.info("Mapped game {} → ticker {}", game_id, t)
+                # Subscribe to orderbook deltas so we get live price updates
+                if self._kalshi_feed and hasattr(self._kalshi_feed, "update_markets"):
+                    asyncio.create_task(self._kalshi_feed.update_markets(matched))
 
     def register_game_market(self, game_id: str, ticker: str) -> None:
         """Manually map a game to a market ticker."""

@@ -42,11 +42,9 @@ class KalshiFeedWatcher:
         self._msg_id = 1
         self._running = True
 
-        # Local order book: ticker -> {"bids": {price: qty}, "asks": {price: qty}}
+        # Local order book: ticker -> {"yes": {price_cents: qty}, "no": {price_cents: qty}}
         # Dict avoids O(N log N) sort on every delta; best bid/ask via max/min
-        self._orderbooks: dict[str, dict[str, dict[int, int]]] = defaultdict(
-            lambda: {"bids": {}, "asks": {}}
-        )
+        self._orderbooks: dict[str, dict[str, dict[int, int]]] = {}
 
         # Executor callbacks
         self._fill_callbacks: list[OnFillCallback] = []
@@ -54,6 +52,9 @@ class KalshiFeedWatcher:
 
         # Strong refs to fire-and-forget callback tasks (prevents GC mid-flight)
         self._bg_tasks: set[asyncio.Task] = set()
+
+        # Queue for snapshot-derived MarketState publishes (sync → async bridge)
+        self._snapshot_publish_queue: list[MarketState] = []
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -85,7 +86,13 @@ class KalshiFeedWatcher:
         headers = self._client.sign_ws_headers()
         ws_url = self._client.get_ws_url()
 
-        async with websockets.connect(ws_url, additional_headers=headers) as ws:
+        async with websockets.connect(
+            ws_url,
+            additional_headers=headers,
+            ping_interval=10,
+            ping_timeout=30,
+            close_timeout=5,
+        ) as ws:
             self._ws = ws
             self._orderbooks.clear()
             logger.info("Connected to Kalshi WebSocket: {}", ws_url)
@@ -142,6 +149,11 @@ class KalshiFeedWatcher:
     # ------------------------------------------------------------------
 
     async def _dispatch(self, data: dict) -> None:
+        # Flush any queued snapshot publishes
+        while self._snapshot_publish_queue:
+            ms = self._snapshot_publish_queue.pop(0)
+            await self._bus.publish("market:state", ms)
+
         msg_type = data.get("type", "")
 
         if msg_type == "ticker":
@@ -184,36 +196,86 @@ class KalshiFeedWatcher:
 
     def _handle_ob_snapshot(self, msg: dict) -> None:
         ticker = msg.get("market_ticker", "")
-        bids = {int(lvl[0]): int(lvl[1]) for lvl in msg.get("bids", []) if lvl[1] > 0}
-        asks = {int(lvl[0]): int(lvl[1]) for lvl in msg.get("asks", []) if lvl[1] > 0}
-        self._orderbooks[ticker] = {"bids": bids, "asks": asks}
-        logger.debug(
-            "OB snapshot for {}: {} bid levels, {} ask levels",
-            ticker, len(bids), len(asks),
-        )
+        # Kalshi V2: yes_dollars_fp / no_dollars_fp with [["0.4200", "500.00"], ...]
+        yes_raw = msg.get("yes_dollars_fp", msg.get("yes", msg.get("bids", [])))
+        no_raw = msg.get("no_dollars_fp", msg.get("no", msg.get("asks", [])))
+        yes_book: dict[int, int] = {}
+        no_book: dict[int, int] = {}
+        for lvl in yes_raw:
+            if len(lvl) >= 2:
+                price_cents = int(round(float(lvl[0]) * 100))
+                qty = int(round(float(lvl[1])))
+                if qty > 0 and price_cents > 0:
+                    yes_book[price_cents] = qty
+        for lvl in no_raw:
+            if len(lvl) >= 2:
+                price_cents = int(round(float(lvl[0]) * 100))
+                qty = int(round(float(lvl[1])))
+                if qty > 0 and price_cents > 0:
+                    no_book[price_cents] = qty
+        self._orderbooks[ticker] = {"yes": yes_book, "no": no_book}
+        if yes_book or no_book:
+            yes_bid = max(yes_book) if yes_book else 0
+            no_bid = max(no_book) if no_book else 0
+            yes_ask = (100 - no_bid) if no_bid > 0 else 0
+            logger.info(
+                "OB snapshot for {}: yes_bid={}c yes_ask={}c ({} yes/{} no levels)",
+                ticker, yes_bid, yes_ask, len(yes_book), len(no_book),
+            )
+            # Publish initial market state from snapshot
+            self._snapshot_publish_queue.append(MarketState(
+                ticker=ticker,
+                yes_bid=yes_bid,
+                yes_ask=yes_ask,
+                no_bid=no_bid,
+                no_ask=(100 - yes_bid) if yes_bid > 0 else 0,
+                volume=0,
+                timestamp=datetime.utcnow(),
+            ))
 
     async def _handle_ob_delta(self, msg: dict) -> None:
         ticker = msg.get("market_ticker", "")
+
+        # Auto-initialize orderbook if we haven't seen a snapshot
         if ticker not in self._orderbooks:
-            return
+            if ticker.startswith("KXNBA"):
+                self._orderbooks[ticker] = {"yes": {}, "no": {}}
+            else:
+                return
 
         book = self._orderbooks[ticker]
 
-        for price, quantity in msg.get("bids", []):
-            self._apply_delta(book["bids"], price, quantity)
+        # Kalshi V2 WS format: single level per message
+        # {price_dollars: "0.42", delta_fp: "100.00", side: "yes"}
+        price_str = msg.get("price_dollars")
+        delta_str = msg.get("delta_fp")
+        side = msg.get("side", "")
 
-        for price, quantity in msg.get("asks", []):
-            self._apply_delta(book["asks"], price, quantity)
+        if price_str and delta_str and side in ("yes", "no"):
+            price_cents = int(round(float(price_str) * 100))
+            quantity = int(round(float(delta_str)))
+            self._apply_delta(book[side], price_cents, quantity)
+        else:
+            # Legacy batched format fallback
+            for price, quantity in msg.get("bids", []):
+                self._apply_delta(book.get("yes", {}), price, quantity)
+            for price, quantity in msg.get("asks", []):
+                self._apply_delta(book.get("no", {}), price, quantity)
 
-        bids = book["bids"]
-        asks = book["asks"]
+        yes_book = book.get("yes", {})
+        no_book = book.get("no", {})
         try:
+            yes_bid = max(yes_book) if yes_book else 0
+            # yes_ask = 100 - best_no_bid (Kalshi binary market)
+            no_bid = max(no_book) if no_book else 0
+            yes_ask = (100 - no_bid) if no_bid > 0 else 0
+
             market_state = MarketState(
                 ticker=ticker,
-                yes_bid=max(bids) if bids else 0,
-                yes_ask=min(asks) if asks else 0,
-                no_bid=0,
-                no_ask=0,
+                yes_bid=yes_bid,
+                yes_ask=yes_ask,
+                no_bid=no_bid,
+                no_ask=(100 - yes_bid) if yes_bid > 0 else 0,
                 volume=0,
                 timestamp=datetime.utcnow(),
             )

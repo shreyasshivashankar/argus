@@ -86,19 +86,28 @@ class SharpOddsFeed:
             if self._session and not self._session.closed:
                 await self._session.close()
 
+    # Sportsbooks to poll, in priority order.  Pinnacle is the sharpest
+    # but requires the $399 Sharp tier.  On the free tier we fall back to
+    # DraftKings/FanDuel — the two highest-volume US books whose opening
+    # lines closely track Pinnacle (typically within 0.5-1 pt on totals).
+    _BOOKS_PRIORITY = ["pinnacle", "draftkings", "fanduel"]
+
     async def _poll_odds(self) -> None:
-        """Fetch NBA Pinnacle odds from SharpAPI."""
+        """Fetch NBA odds from the best available sportsbook."""
         assert self._session is not None
 
         now = datetime.now(timezone.utc)
         markets_fetched = 0
 
-        # Fetch totals, spreads, moneyline in one call
-        for market_type in ("total", "spread", "moneyline"):
+        # Try books in priority order; stop at first that works
+        book = await self._pick_book()
+
+        # SharpAPI market names: total_points, point_spread, moneyline
+        for market_type in ("total_points", "point_spread", "moneyline"):
             url = f"{_BASE_URL}/odds"
             params = {
                 "league": "nba",
-                "sportsbook": "pinnacle",
+                "sportsbook": book,
                 "market": market_type,
                 "limit": 200,
             }
@@ -129,11 +138,17 @@ class SharpOddsFeed:
                 len(self._sharp_lines),
             )
 
+    # Map SharpAPI market_type to our internal keys
+    _MARKET_TYPE_MAP = {
+        "total_points": "TOTAL",
+        "point_spread": "SPREAD",
+        "moneyline": "MONEYLINE",
+    }
+
     def _process_odds_item(
         self, item: dict[str, Any], market_type: str, now: datetime
     ) -> None:
         """Process a single odds item from SharpAPI response."""
-        # Build a normalized event key from team names
         home = (item.get("home_team") or "").strip()
         away = (item.get("away_team") or "").strip()
         if not home or not away:
@@ -150,31 +165,22 @@ class SharpOddsFeed:
         if not prob or prob <= 0:
             return
 
-        line = 0.0
-        mtype_key = market_type.upper()
+        mtype_key = self._MARKET_TYPE_MAP.get(market_type, market_type.upper())
+        line = float(item.get("line", 0) or 0)
+        selection_type = (item.get("selection_type") or item.get("selection") or "").lower()
 
-        selection = (item.get("selection") or "").strip()
+        if market_type == "total_points":
+            # We want the over probability; if this is under, skip
+            # (we'll get the over line from the over selection)
+            if "under" in selection_type:
+                return
+            if line <= 0:
+                return
 
-        if market_type == "total":
-            # selection like "Over 224.5" or "Under 224.5"
-            parts = selection.split()
-            if len(parts) >= 2:
-                try:
-                    line = float(parts[-1])
-                except ValueError:
-                    return
-            # We want the over probability; if this is under, invert
-            if "under" in selection.lower():
-                prob = 1.0 - prob
-
-        elif market_type == "spread":
-            # selection like "PHO Suns -3.5"
-            parts = selection.rsplit(None, 1)
-            if len(parts) >= 2:
-                try:
-                    line = abs(float(parts[-1]))
-                except ValueError:
-                    return
+        elif market_type == "point_spread":
+            line = abs(line) if line else 0
+            if line <= 0:
+                return
 
         # Store
         if event_key not in self._sharp_lines:
@@ -237,6 +243,34 @@ class SharpOddsFeed:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _pick_book(self) -> str:
+        """Select the best available sportsbook for our tier.
+
+        Tries Pinnacle first (sharpest); falls back to DraftKings/FanDuel
+        on the free tier where Pinnacle returns 403.
+        """
+        if hasattr(self, "_verified_book"):
+            return self._verified_book
+
+        assert self._session is not None
+        for book in self._BOOKS_PRIORITY:
+            url = f"{_BASE_URL}/odds"
+            params = {"league": "nba", "sportsbook": book, "market": "total_points", "limit": 1}
+            try:
+                async with self._session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        self._verified_book = book
+                        logger.info("SharpAPI: using {} as odds source", book)
+                        return book
+                    logger.debug("SharpAPI: {} returned HTTP {} — trying next", book, resp.status)
+            except Exception:
+                continue
+
+        # Fallback
+        self._verified_book = "draftkings"
+        logger.warning("SharpAPI: all books failed probe — defaulting to draftkings")
+        return self._verified_book
 
     @staticmethod
     def _american_to_prob(odds: float) -> float:

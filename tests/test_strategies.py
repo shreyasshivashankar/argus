@@ -337,22 +337,39 @@ class TestArbitrageEvaluate:
         market = _make_arb_market(yes_ask=50, no_ask=48)
         assert s.evaluate(game, market) is None
 
-    def test_rejects_when_net_spread_below_one_cent(self):
-        """Combined=93c but fees consume the spread → net < 1c → rejected.
-
-        YES=46 NO=47 → gross=7c.
-        fee_yes = ceil(0.07 * 46 * 54 / 100) = ceil(1.74) = 2
-        fee_no  = ceil(0.07 * 47 * 53 / 100) = ceil(1.74) = 2
-        net = 7 - 2 - 2 = 3c → still fires; adjust to a tighter spread.
-
-        YES=48 NO=49 → gross=3c.
-        fee_yes = ceil(0.07 * 48 * 52 / 100) = ceil(1.75) = 2
-        fee_no  = ceil(0.07 * 49 * 51 / 100) = ceil(1.75) = 2
-        net = 3 - 2 - 2 = -1c → rejected.
-        """
+    def test_rejects_when_net_spread_below_min(self):
+        """YES=48 NO=49 → gross=3c, fees=4c total → net=-1c → rejected."""
         s = ArbitrageStrategy(max_combined_cents=99)
         game = make_game_state()
         market = _make_arb_market(yes_ask=48, no_ask=49)
+        assert s.evaluate(game, market) is None
+
+    def test_rejects_marginal_net_spread(self):
+        """YES=46 NO=47 → gross=7c, fees=4c → net=3c but combined=93 < 95.
+
+        With MIN_NET_SPREAD_CENTS=3 this is exactly at boundary.
+        Tighten to YES=47 NO=48 → gross=5c, fees=4c → net=1c < 3c → rejected.
+        """
+        s = ArbitrageStrategy(max_combined_cents=99)
+        game = make_game_state()
+        market = _make_arb_market(yes_ask=47, no_ask=48)
+        assert s.evaluate(game, market) is None
+
+    def test_rejects_low_volume_market(self):
+        """Even with a valid spread, low volume markets are too illiquid."""
+        s = ArbitrageStrategy(max_combined_cents=95)
+        game = make_game_state()
+        market = make_market_state(
+            ticker="KXNBAGAME-04MAR26-DENLAL-LAL",
+            yes_ask=40, no_ask=50, volume=10,
+        )
+        assert s.evaluate(game, market) is None
+
+    def test_rejects_extreme_side_price(self):
+        """Prices near 0 or 100 are too illiquid / manipulated."""
+        s = ArbitrageStrategy(max_combined_cents=99)
+        game = make_game_state()
+        market = _make_arb_market(yes_ask=5, no_ask=90)
         assert s.evaluate(game, market) is None
 
     def test_ev_equals_net_spread_over_100(self):

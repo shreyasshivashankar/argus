@@ -11,9 +11,10 @@ Kalshi fee    ≈ ceil(0.07 * p * (1-p) * 100) per contract per side
 Typical fee   ≈ 1–2c per side at mid-range prices
 Net spread    = gross - fee_yes - fee_no
 
-We require net_spread >= 1c and only fire when gross spread covers fees
-with a buffer.  The companion NO order is signalled via ``no_entry_price``
-on the Signal; the executor places both legs simultaneously.
+We require net_spread >= MIN_NET_SPREAD_CENTS and guard against
+illiquid markets with a minimum volume threshold.  The companion NO
+order is signalled via ``no_entry_price`` on the Signal; the executor
+places both legs simultaneously.
 """
 from __future__ import annotations
 
@@ -21,6 +22,11 @@ import math
 
 from sports.nba.strategies.base import BaseStrategy
 from core.schemas import Action, GameState, MarketState, Side, Signal, SignalStatus
+
+MIN_NET_SPREAD_CENTS = 3
+MIN_VOLUME = 50
+MIN_SIDE_PRICE = 10
+MAX_SIDE_PRICE = 90
 
 
 class ArbitrageStrategy(BaseStrategy):
@@ -49,22 +55,27 @@ class ArbitrageStrategy(BaseStrategy):
         if yes_ask <= 0 or no_ask <= 0:
             return None
 
+        if yes_ask < MIN_SIDE_PRICE or no_ask < MIN_SIDE_PRICE:
+            return None
+        if yes_ask > MAX_SIDE_PRICE or no_ask > MAX_SIDE_PRICE:
+            return None
+
+        if market.volume < MIN_VOLUME:
+            return None
+
         combined = yes_ask + no_ask
         if combined > self._max_combined:
             return None
 
         gross_spread = 100 - combined
 
-        # Taker fee per contract: ceil(0.07 * p * (1-p) * 100) cents
         fee_yes = math.ceil(0.07 * yes_ask * (100 - yes_ask) / 100)
         fee_no = math.ceil(0.07 * no_ask * (100 - no_ask) / 100)
         net_spread = gross_spread - fee_yes - fee_no
 
-        if net_spread < 1:
+        if net_spread < MIN_NET_SPREAD_CENTS:
             return None
 
-        # Use moderate confidence so Kelly sizes conservatively (not infinity)
-        # Arb is ~certain, but we set 0.62 to keep position sizes sane
         confidence = 0.62
         ev = net_spread / 100.0
 
@@ -77,7 +88,7 @@ class ArbitrageStrategy(BaseStrategy):
             source=self.name,
             ev_estimate=ev,
             entry_price=yes_ask,
-            exit_price=99,      # Hold to settlement; 98c auto-cashout handles this
+            exit_price=99,
             game_id=game.game_id,
-            no_entry_price=no_ask,  # Executor places companion NO order
+            no_entry_price=no_ask,
         )
